@@ -52,7 +52,7 @@ appropriate arguments
 .. code:: bash
 
 
-   pftag --tag "run-%timestamp-on-%platform-%archlog"
+   pftag --tag "run-%timestamp-on-%platform-%arch.log"
 
    run-2023-03-10T13:41:58.921660-05:00-on-Linux-64bit-ELF.log
 
@@ -64,8 +64,8 @@ the simplest is just to declare an object and instantiate with an empty
 dictionary. Then call the object with the ``tag`` to process.
 
 If you wanted to set any other values in the declaration, use an
-appropriate dictionaryt. The dictionary keys are *identical* to the
-script CLI keys:
+appropriate dictionary. The dictionary keys are *identical* to the
+script CLI keys (*sans* the leading ``--``):
 
 .. code:: python
 

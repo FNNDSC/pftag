@@ -38,7 +38,7 @@ docker pull fnndsc/pftag
 To use `pftag` in script mode you simply call the script with appropriate arguments
 ```bash
 
-pftag --tag "run-%timestamp-on-%platform-%archlog"
+pftag --tag "run-%timestamp-on-%platform-%arch.log"
 
 run-2023-03-10T13:41:58.921660-05:00-on-Linux-64bit-ELF.log
 ```
@@ -47,7 +47,7 @@ run-2023-03-10T13:41:58.921660-05:00-on-Linux-64bit-ELF.log
 
 There are several ways to use `pftag` in python module mode. Perhaps the simplest is just to declare an object and instantiate with an empty dictionary. Then call the object with the `tag` to process.
 
-If you wanted to set any other values in the declaration, use an appropriate dictionaryt. The dictionary keys are _identical_ to the script CLI keys:
+If you wanted to set any other values in the declaration, use an appropriate dictionary. The dictionary keys are _identical_ to the script CLI keys (_sans_ the leading `--`):
 
 ```python
 from pftag import pftag
