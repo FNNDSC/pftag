@@ -50,7 +50,6 @@ package_CLIself:str         = """
         [--funcMarker <mark>]                                                   \\
         [--funcArgMarker <mark>]                                                \\
         [--funcSep <mark>]                                                      \\
-        [--test]                                                                \\
         [--inputdir <inputdir>]                                                 \\
         [--outputdir <outputdir>]                                               \\
         [--man]                                                                 \\
@@ -79,9 +78,6 @@ package_CLIsynpsisArgs:str  = """
         [--funcSep <mark>]
         The marker string separating successive function/argument constructs
         (default ",").
-
-        [--test]
-        If specified, run a small internal test on multi-logger calls.
 
         [--pftelUser <user>] ("chris")
         The name of the pftel user. Reserved for future use.
@@ -293,12 +289,9 @@ def synopsis(ab_shortOnly = False):
     else:
         return shortSynopsis + description
 
-parser                  = ArgumentParser(
-    description         = '''
-A client for pftag
-''',
-    formatter_class     = RawTextHelpFormatter
-)
+# parser: ArgumentParser = ArgumentParser(description         = '''A client for pftag''',
+#                                         formatter_class     = RawTextHelpFormatter
+# )
 
 def earlyExit_check(args) -> int:
     """
@@ -322,15 +315,6 @@ def earlyExit_check(args) -> int:
     if int(args.verbosity) > 1: print(DISPLAY_TITLE)
     return 0
 
-def test_dict() -> dict:
-    # Here we create as tagger without the CLI parser, but a JSON
-    # object.
-    str_tag:str = r'run-%timestamp_chrplc|:|-_-OS-%platform-%NAME_dcmname_-%literal_echo|Subject4,md5|5_.log'
-    tagger:pftag.Pftag      = pftag.Pftag({})
-
-    d_tag:dict             = tagger(str_tag)
-    print(d_tag['result'])
-
 def main(argv=None) -> int:
     """
     Main method for the programmatical calling the pftag
@@ -340,7 +324,7 @@ def main(argv=None) -> int:
     # Call the following to collect the logger Namespace
     # and then edit values in the options:Namespace if needed
     parser:ArgumentParser   = parser_setup('A client for logging to a pftel server')
-    options:Namespace       = parser_interpret(parser)
+    options:Namespace       = parser_interpret(parser, argv)
 
     # any reason we should not continue?
     if earlyExit_check(options): return 1
@@ -349,8 +333,6 @@ def main(argv=None) -> int:
     tag:pftag.Pftag         = pftag.Pftag(options)
     d_pftag:dict            = tag.run(options.tag)
     print(d_pftag['result'])
-
-    if options.test: test_dict()
 
     return 0 if d_pftag['status'] else 2
 
