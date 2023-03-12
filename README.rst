@@ -89,7 +89,6 @@ The set of CLI arguments can also be passed in a dictionary of
    {
            "CLIkey1": "value1",
            "CLIkey2": "value2",
-           ...
    }
 
 .. code:: html
@@ -110,12 +109,6 @@ The set of CLI arguments can also be passed in a dictionary of
            [--funcSep <mark>]
            The marker string separating successive function/argument constructs
            (default ",").
-
-           [--test]
-           If specified, run a small internal test on multi-logger calls.
-
-           [--pftelUser <user>] ("chris")
-           The name of the pftel user. Reserved for future use.
 
            [--inputdir <inputdir>]
            An optional input directory specifier. Reserverd for future use.
@@ -299,7 +292,12 @@ only *live* when a ``--debug`` flag is passed.
 Testing
 ~~~~~~~
 
-Run unit tests using ``pytest``. Coming soon!
+Run unit tests using ``pytest``
+
+.. code:: bash
+
+   # In repo root dir:
+   pytest
 
 *-30-*
 
