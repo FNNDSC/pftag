@@ -63,12 +63,6 @@ def parser_setup(str_desc) -> ArgumentParser:
                 help    = 'show a synopsis'
     )
     parser.add_argument(
-                '--test',
-                default = False,
-                action  = 'store_true',
-                help    = 'call an internal test method'
-    )
-    parser.add_argument(
                 '--inputdir',
                 default = './',
                 help    = 'optional directory specifying extra input-relative data'
@@ -138,7 +132,7 @@ def parser_interpret(parser, *args):
     *args is empty
     """
     if len(args):
-        args    = parser.parse_args(*args)
+        args    = parser.parse_args(args[0])
     else:
         args    = parser.parse_args(sys.argv[1:])
     return args
@@ -197,7 +191,13 @@ class Pftag:
         self.env:data.env                   = data.env()
 
         self.d_tagReserved:dict[str, list[str]]                  = {
-            'core'      : ['literal', 'timestamp', 'os', 'platform', 'release', 'name', 'arch']
+            'core'      : ['literal',
+                           'os',
+                           'platform',
+                           'release',
+                           'machine',
+                           'arch',
+                           'timestamp']
         }
 
         # If the <options> is a dictionary, then we interpret this as if
@@ -295,7 +295,7 @@ class Pftag:
         lookup:str  = ""
         tag:str     = tag.lower()
         if 'literal'        in tag: lookup  = 'literal'
-        if 'name'           in tag: lookup  = os.name
+        if 'os'             in tag: lookup  = os.name
         if 'platform'       in tag: lookup  = platform.system()
         if 'release'        in tag: lookup  = platform.release()
         if 'machine'        in tag: lookup  = platform.machine()
@@ -323,7 +323,7 @@ class Pftag:
     def tag_process(self, astr:str, *args, **kwargs):
         """
         This method processes a string that contains "%<tag>" tokens in a
-        variety of ways. Various %<tags> are understood:
+        variety of ways. Various %<tags> are understood, for example:
 
             * %timestamp     - a timestamp
             * %os            - the OS name
