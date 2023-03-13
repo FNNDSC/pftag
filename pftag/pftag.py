@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-__version__ = '1.2.6'
+__version__ = '1.2.8'
 
 from    pathlib                 import Path
 
@@ -12,7 +12,7 @@ from    threading               import current_thread
 
 from    datetime                import datetime, timezone
 
-from    typing                  import Any, Callable, Tuple
+from    typing                  import Any, Callable, Tuple, List
 from    faker                   import  Faker
 
 import  logging
@@ -244,7 +244,7 @@ class Pftag:
                 self.self.env.DEBUG("%25s:  [%s]" % (k, v), level = 3)
             self.self.env.DEBUG("")
 
-    def tag_findDict(self, tag:str) -> list[Tuple]:
+    def tag_findDict(self, tag:str) -> List[Tuple]:
         """
         For a given <tag> superstring, determine if any reserved dictionaries
         contain a token within the <tag>. If found, add the dictionary name and
@@ -494,7 +494,7 @@ class Pftag:
             l_tagFunc:list  = tagFunc.split(f'{F}')
             if len(l_tagFunc) > 1:  tag, func = (l_tagFunc[0], l_tagFunc[1])
             else:                   tag, func = (l_tagFunc[0], "")
-            lt_hit:list[Tuple]  = self.tag_findDict(tag)
+            lt_hit:List[Tuple]  = self.tag_findDict(tag)
             tagLookup           = tag if not lt_hit else self.tag_lookup(lt_hit[0])
             if func:
                 for f in func.split(f'{S}'):
