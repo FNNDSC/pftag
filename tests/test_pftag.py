@@ -1,10 +1,12 @@
 from pathlib        import Path
-from pftag          import  pftag
+from pftag          import pftag
 from pftag.__main__ import main
-from pftag.pftag    import parser_setup, parser_JSONinterpret, parser_interpret
+from pftag.pftag    import parser_setup, parser_JSONinterpret, parser_interpret, timestamp_dt
 from argparse       import  ArgumentParser, Namespace
 import              pudb
 import              pytest
+from datetime       import datetime
+import              time
 
 @pytest.fixture(params = ['literal', 'os'])
 def IOcomparisons_setup(request) -> tuple[str, str]:
@@ -41,3 +43,29 @@ def test_noCLIinit() -> dict:
 
     d_tag:dict             = tagger(str_tag)
     assert d_tag['result'] == "run-2023-03-12T17-17-40.997150-04-00-OS-Linux-ROSALES^ANDREW-37149.log"
+
+def test_timestamp_dt() -> None:
+    """
+    Get a %timestamp and assert return type is datetime.
+    """
+    str_tag:str = r'%timestamp'
+    tagger:pftag.Pftag     = pftag.Pftag({})
+    d_tag:dict             = tagger(str_tag)
+    dt:datetime            = timestamp_dt(d_tag['result'])
+    assert type(dt)       == datetime
+
+def test_timestamp_diff() -> None:
+    """
+    Test a 1 second timestamp difference
+    """
+    tagger:pftag.Pftag      = pftag.Pftag({})
+    d_tag:dict              = tagger(r'%timestamp')
+    t1:str                  = d_tag['result']
+    time.sleep(1)
+    d_tag                   = tagger(r'%timestamp')
+    t2:str                  = d_tag['result']
+    dt_t1:datetime          = timestamp_dt(t1)
+    dt_t2:datetime          = timestamp_dt(t2)
+    dt:float                = (dt_t2 - dt_t1).total_seconds()
+    diff:int                = round(dt)
+    assert diff == 1
