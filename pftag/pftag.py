@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-__version__ = '1.2.4'
+__version__ = '1.2.6'
 
 from    pathlib                 import Path
 
@@ -308,6 +308,8 @@ class Pftag:
         Main dispatching method for looking up a tag across a variety of
         possible use cases (<dictionaryName>).
 
+        (Note, match not used for python < 3.10 compatibility)
+
         Args:
             tagTuple (tuple): a tuple of <dictionaryName> and <tag> to lookup
 
@@ -315,9 +317,10 @@ class Pftag:
             str: the lookup value for the <tag>
         """
         lookup:str  = ""
-        match tagTuple[0]:
-            case 'core':
-                lookup  = self.tag_lookupCore(tagTuple[1])
+        if 'core' in tagTuple[0]: lookup = self.tag_lookupCore(tagTuple[1])
+        # match tagTuple[0]:
+        #     case 'core':
+        #         lookup  = self.tag_lookupCore(tagTuple[1])
         return lookup
 
     def tag_process(self, astr:str, *args, **kwargs):
