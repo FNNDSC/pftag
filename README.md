@@ -2,7 +2,7 @@
 
 [![Version](https://img.shields.io/docker/v/fnndsc/pftag?sort=semver)](https://hub.docker.com/r/fnndsc/pftag)
 [![MIT License](https://img.shields.io/github/license/fnndsc/pftag)](https://github.com/FNNDSC/pftag/blob/main/LICENSE)
-[![ci](https://github.com/FNNDSC/pftag/actions/workflows/ci.yml/badge.svg)](https://github.com/FNNDSC/pftag/actions/workflows/build.yml)
+[![ci](https://github.com/FNNDSC/pftag/actions/workflows/build.yml/badge.svg)](https://github.com/FNNDSC/pftag/actions/workflows/build.yml)
 
 ## Abstract
 
@@ -35,7 +35,7 @@ docker pull fnndsc/pftag
 
 ### Script mode
 
-To use `pftag` in script mode you simply call the script with appropriate arguments
+To use `pftag` in script mode simply call the script with appropriate CLI arguments
 ```bash
 
 pftag --tag "run-%timestamp-on-%platform-%arch.log"
@@ -45,9 +45,9 @@ run-2023-03-10T13:41:58.921660-05:00-on-Linux-64bit-ELF.log
 
 ### Module mode
 
-There are several ways to use `pftag` in python module mode. Perhaps the simplest is just to declare an object and instantiate with an empty dictionary. Then call the object with the `tag` to process.
+There are several ways to use `pftag` in python module mode. Perhaps the simplest is just to declare an object and instantiate with an empty dictionary, and then call the object with the `tag` to process.
 
-If you wanted to set any other values in the declaration, use an appropriate dictionary. The dictionary keys are _identical_ to the script CLI keys (_sans_ the leading `--`):
+If additional values need to be set in the declaration, use an appropriate dictionary. The dictionary keys are _identical_ to the script CLI keys (_sans_ the leading `--`):
 
 ```python
 from pftag import pftag
@@ -125,9 +125,9 @@ The set of CLI arguments can also be passed in a dictionary of
         TAGS
 
             %literal   : simply replace the tag with the word 'literal'.
-                          This tag is only useful in conjunction with the
-                          'echo' function and together they provide a means
-                          to inject arbitary text typically for md5 hashing.
+                         This tag is only useful in conjunction with the
+                         'echo' function and together they provide a means
+                         to inject arbitary text typically for md5 hashing.
             %name      : return the os.name
             %platform  : return the platform.system()
             %release   : return the platform.release()
@@ -153,8 +153,8 @@ The set of CLI arguments can also be passed in a dictionary of
                               the actual timestamp where all ":" are replaced with
                               "-".
 
-        strmsk|<mask>       : for each '*' in mask pattern use upstream char
-                              otherwise replace with <mask> char.
+        strmsk|<mask>       : for each '*' in mask pattern use ups tream char
+                              otherwise replace with <mask> char .
 
                                 eg: "%platform_strmsk|l****_"
 
@@ -164,7 +164,7 @@ The set of CLI arguments can also be passed in a dictionary of
                               has more than 4 characters, only return the 5
                               chars as masked.
 
-        dcmname|<s>|<tail> : replace any upstream %VAR with a DICOM formatted
+        dcmname|<s>|<tail>  : replace any upstream %VAR with a DICOM formatted
                               name. If <s> is passed, the seed the faker module
                               with <s> (any string) -- this guarantees that calls
                               with that same <s> result in the same name. If
@@ -172,38 +172,38 @@ The set of CLI arguments can also be passed in a dictionary of
 
                                 eg: %NAME_dcmname_
 
-                             may produce "BROOKS^JOHN". Each call will have
-                             a different name. However,
+                              may produce "BROOKS^JOHN". Each call will have
+                              a different name. However,
 
                                 %NAME_dcmname|foobar_
 
-                            will always generate "SCHWARTZ^THOMAS". While
+                              will always generate "SCHWARTZ^THOMAS". While
 
                                 %NAME_dcmname|foobar|^ANON
 
-                            will generate "SCHWARTZ^THOMAS^ANON"
+                              will generate "SCHWARTZ^THOMAS^ANON"
 
-        echo|<something> :  Best used with the %literal tag for legibility, will
-                            replace the tag with <something>. Be careful of commas
-                            in the <something>. If they are to be preserved you
-                            will need to set --funcSep to something other than a
-                            comma.
+        echo|<something>    : Best used with the %literal tag for legibility, will
+                              replace the tag with <something>. Be careful of commas
+                              in the <something>. If they are to be preserved you
+                              will need to set --funcSep to something other than a
+                              comma.
 
                                 %literal_echo|why-are-we-here?_
 
-                            will replace the %literal with "why-are-we-here".
-                            This is most useful when literal data is to obscured
-                            in a template. For instance:
+                              will replace the %literal with "why-are-we-here".
+                              This is most useful when literal data is to obscured
+                              in a template. For instance:
 
                                 %literal_echo|Subject12345,md5|5_
 
-                            where say "Subject12345" is privileged information but
-                            important to add to the string. In this case, we can
-                            add and then hash that literal string. In future,
-                            if we know all the privileged strings, we can easily
-                            hash and then and lookup in any `pftag` generated
-                            strings to resolve which hashes belong to which
-                            subjects.
+                              where say "Subject12345" is privileged information but
+                              important to add to the string. In this case, we can
+                              add and then hash that literal string. In future,
+                              if we know all the privileged strings, we can easily
+                              hash and then and lookup in any `pftag` generated
+                              strings to resolve which hashes belong to which
+                              subjects.
 ```
 
 ## Functions
@@ -213,21 +213,23 @@ The set of CLI arguments can also be passed in a dictionary of
         package can also process the lookup value in various ways. These
         process functions follow a Reverse Polish Notation (RPN) schema of
 
-            tag func1 func2 func3 ...
+            tag func1(args1) func2(args2) func3(args3) ...
 
         where first the <tag> is looked up, then this lookup is processed by
         <func1>. The result is then processed by <func2>, and so on and
-        so forth.
+        so forth, each functional optionally with a set a arguments.
 
         This RPN approach also mirrors the standard UNIX piping schema.
 
-        A function that is to be applied to a <tag> should be connected
-        to the tag with a <funcMarker> string, usually '_'. The final
-        function should end with the same <funcMarker>, so
+        A function (or function list) that is to be applied to a <tag> should
+        be connected to the tag with a <funcMarker> string, usually '_'. The
+        final function should end with the same <funcMarker>, so
 
-            %tag_func_
+            %tag_func1,func2,...,funcN_
 
-        will apply the function called "func" to the tag called "tag".
+        will apply the function list in order to the tag value lookup called
+        "tag"; each successive evaluation consuming the result of its
+        predecessor as input.
 
         Some functions can accept arguments. Arguments are passed to a function
         with a <funcArgMarker> string, typically '|', that also separates
@@ -238,12 +240,12 @@ The set of CLI arguments can also be passed in a dictionary of
         will pass 'a1', 'a2', and 'a3' as parameters to "func".
 
         Finally, several functions can be chained within the '_'...'_' by
-        separating the <func>|<argList> constructs with commas, so
+        separating the <func>|<argList> constructs with commas, so pedantically
 
-            %tag_func|a1|a2|a3,func2|b1|b2|b3_
+            %tag_func1|a1|a2|a3,func2|b1|b2|b3_
 
         All these special characters (tag marker, function pre- and post,
-        arg separation, fand unction separation can be overriden. For instance,
+        arg separation, function separation can be overriden. For instance,
         with a selection of
 
         --tagMarker "@" --funcMarker "[" --funcArgMarker "," --funcSep "|"
@@ -265,7 +267,7 @@ To debug, the simplest mechanism is to trigger the internal remote telnet sessio
 
 ### Testing
 
-Run unit tests using `pytest`
+Run unit tests using `pytest`.
 
 ```bash
 # In repo root dir:
