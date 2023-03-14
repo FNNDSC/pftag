@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-__version__ = '1.2.8'
+__version__ = '1.2.10'
 
 from    pathlib                 import Path
 
@@ -552,4 +552,10 @@ def timestamp_dt(str_datetime:str) -> datetime:
     Returns:
         datetime: a datetime object of the input
     """
-    return datetime.strptime(str_datetime, '%Y-%m-%dT%H:%M:%S.%f%z')
+    dt:datetime     = None
+    try:
+        dt = datetime.strptime(str_datetime, '%Y-%m-%dT%H:%M:%S.%f%z')
+    except:
+        # py36 backwards compatibility
+        dt = datetime.strptime(str_datetime[:-6], '%Y-%m-%dT%H:%M:%S.%f')
+    return dt
