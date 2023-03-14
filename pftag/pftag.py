@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-__version__ = '1.2.14'
+__version__ = '1.2.16'
 
 from    pathlib                 import Path
 
@@ -481,7 +481,7 @@ class Pftag:
         d_ret:dict[str, Any]    = {
             'status':           False,
             'funcApplied':      [],
-            'result':           ""
+            'result':           astr
         }
         T:str                   = self.str_tagMarker
         F:str                   = self.str_funcMarker
