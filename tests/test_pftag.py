@@ -3,6 +3,8 @@ from pftag          import pftag
 from pftag.__main__ import main
 from pftag.pftag    import parser_setup, parser_JSONinterpret, parser_interpret, timestamp_dt
 from argparse       import  ArgumentParser, Namespace
+import  os
+os.environ['XDG_CONFIG_HOME'] = '/tmp'
 import              pudb
 import              pytest
 from datetime       import datetime
