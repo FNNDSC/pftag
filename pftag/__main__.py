@@ -16,6 +16,7 @@ __pkg       = Distribution.from_name(__package__)
 __version__ = __pkg.version
 
 import  os, sys, json
+os.environ['XDG_CONFIG_HOME'] = '/tmp'
 import  pudb
 from    pudb.remote             import set_trace
 from    pftag.pftag             import parser_setup, parser_interpret, parser_JSONinterpret

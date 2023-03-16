@@ -1,9 +1,10 @@
 #!/usr/bin/env python
-__version__ = '1.2.18'
-
+__version__ = '1.2.20'
 from    pathlib                 import Path
 
 import  os, sys, json, platform, re
+os.environ['XDG_CONFIG_HOME'] = '/tmp'
+
 import  pudb
 from    pudb.remote             import set_trace
 

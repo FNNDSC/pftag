@@ -5,6 +5,8 @@ str_about = '''
     Core data includes information on the server (address) as well as
     possible future WIP for authentication/etc
 '''
+import  os
+os.environ['XDG_CONFIG_HOME'] = '/tmp'
 
 from    pudb.remote             import set_trace
 from    curses                  import meta
@@ -13,7 +15,6 @@ from    argparse                import Namespace
 from    loguru                  import logger
 import  pudb
 import  json
-import  os
 import  inspect
 import  sys
 
