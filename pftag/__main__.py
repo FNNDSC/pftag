@@ -47,6 +47,7 @@ str_desc: str                =  DISPLAY_TITLE + """
 
 package_CLIself:str         = """
         --tag <tagString>                                                       \\
+        [--lookupDictAdd <listOfDictionaryString>]                              \\
         [--tagMarker <mark>]                                                    \\
         [--funcMarker <mark>]                                                   \\
         [--funcArgMarker <mark>]                                                \\
@@ -65,6 +66,10 @@ package_CLIsynpsisArgs:str  = """
 
         --tag <tagString>
         The tag string to process.
+
+        [--lookupDictAdd <listOfDictionaryString>]
+        A string list of additional named lookup dictionary tags and values to
+        add.
 
         [--tagMarker <mark>]
         The marker string that identifies a tag (default "%")
@@ -168,6 +173,16 @@ package_CLItagsFuncs:str = r"""
 
         AVAILABLE TAGS AND FUNCTIONS
 
+        Additional tag lookup structures can be added with either the CLI
+        or directory using the python API:
+
+        --lookupDictAdd '[{"secrets": {"CUBEuser": "rudolph", "CUBEpassword": "rudolph1234"}}]'
+
+        will add a new named lookup group called 'secrets' with tags %CUBEuser
+        and %CUBEpassword, substituted in string tags with the values as
+        shown. Any of these new tag lookups can be further processed by
+        internal functions.
+
         The following tags are available:
 
             %literal   : simply replace the tag with the word 'literal'.
@@ -181,7 +196,7 @@ package_CLItagsFuncs:str = r"""
             %arch      : return the '%s' % platform.architecture()
             %timestamp :  return the a timestamp
 
-        The following tags are available:
+        The following functions are available:
 
         md5|<chars>         : perform an md5hash on the upstream, limit result
                               to <chars> characters
@@ -333,7 +348,7 @@ def main(argv=None) -> int:
     # set_trace(term_size=(253, 62), host = '0.0.0.0', port = 7900)
     tag:pftag.Pftag         = pftag.Pftag(options)
     d_pftag:dict            = tag.run(options.tag)
-    print(d_pftag['result'])
+    if d_pftag['status']: print(d_pftag['result'])
 
     return 0 if d_pftag['status'] else 2
 

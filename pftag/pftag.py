@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-__version__ = '1.2.22'
+__version__ = '1.3.0'
 from    pathlib                 import Path
 
 import  os, sys, json, platform, re
@@ -72,6 +72,11 @@ def parser_setup(str_desc) -> ArgumentParser:
                 '--outputdir',
                 default = './',
                 help    = 'optional directory specifying location of any output data'
+    )
+    parser.add_argument(
+                '--lookupDictAdd',
+                default = '',
+                help    = 'simple named dictionary lookups'
     )
     parser.add_argument(
                 '--tag',
@@ -174,9 +179,6 @@ class Pftag:
                     port        = options.debugPort,
                     host        = options.debugHost
         )
-        # if not len(options.tag):
-        #     self.env.ERROR("The '--tag <tag>' CLI MUST be specified!")
-        #     status              = False
         return status
 
     def __init__(self, options, *args, **kwargs):
@@ -201,6 +203,17 @@ class Pftag:
                            'timestamp']
         }
 
+        # Simple lookup structures/handling. These two dictionaries
+        # house "simple" lookup tag structures. A "simple" lookup is
+        # a named dictionary whose keys are the tags, and whose values
+        # are the lookup results.
+        #
+        # Typically, these are passed in the CLI --lookupDictAdd value.
+        self.d_tagSimpleLookupKeys:dict[str, list[str]]         = {
+        }
+        self.d_tagSimpleLookupData:dict[str, dict]              = {
+        }
+
         # If the <options> is a dictionary, then we interpret this as if
         # it were the CLI (instead of the real CLI) and convert to a
         # namespace
@@ -218,6 +231,16 @@ class Pftag:
         self.str_funcMarker:str             = options.funcMarker    # '_'
         self.str_funcArgSep:str             = options.funcArgMarker # '|'
         self.str_funcSep:str                = options.funcSep       # ','
+
+        # Check for successful addition of possible external lists of dictionary
+        # tags
+        if self.options.lookupDictAdd:
+            self.envOK = all([list(x.values())[0] \
+                                for x in \
+                                    list(self.newLookupDictionary_add(
+                                        self.options.lookupDictAdd)
+                                    )
+                            ])
 
         self.env_show()
 
@@ -245,9 +268,37 @@ class Pftag:
                 self.self.env.DEBUG("%25s:  [%s]" % (k, v), level = 3)
             self.self.env.DEBUG("")
 
+    def newLookupDictionary_add(self, ld_data:list[dict]) -> list[bool]:
+        """
+        Add new "named" lookup tag dictionary values
+
+        Args:
+            ld_data (list[dict]): a list of named dictionaries with
+                                  lookup key/value tags
+
+        Returns:
+            bool (list[bool]): for each group, a bool status dictionary
+        """
+        try:
+            ld_data = json.loads(ld_data)
+        except:
+            pass
+        lb_status:list[dict]    = []
+        l_keys:list     = [list(x.keys())[0]    for x in ld_data]
+        l_lookups:list  = [list(x.values())[0]  for x in ld_data]
+        l_tags:list     = [list(y.keys())       for y in l_lookups]
+        for group,tags,data in zip(l_keys, l_tags, l_lookups):
+            try:
+                self.d_tagSimpleLookupKeys[group] = tags
+                self.d_tagSimpleLookupData[group] = data
+                lb_status.append({group: True})
+            except:
+                lb_status.append({group: False})
+        return lb_status
+
     def tag_findDict(self, tag:str) -> List[Tuple]:
         """
-        For a given <tag> superstring, determine if any reserved dictionaries
+        For a given <tag> superstring, determine if any internal dictionaries
         contain a token within the <tag>. If found, add the dictionary name and
         token to a tuple list, and eventually return a list of tuples of
         (<dict>, <tag>) containing hits.
@@ -276,11 +327,12 @@ class Pftag:
         l_tagHit:list           = []    # Which tag, *exactly*, is sought in the possibilities?
         tagHit:str              = ''    # This is it!
         l_tagDict:list          = []    # A list of tuples of (<dict>, <tag>)
-        for d in list(self.d_tagReserved.keys()):
-            l_tagPossibilities:list     = [i for i in self.d_tagReserved[d] if i in tag]
-            l_tagHit:list               = [i for i in l_tagPossibilities if f'{T}'+i in f'{T}'+tag]
-            tagHit:str                  = l_tagHit[0] if len(l_tagHit) else ''
-            if tagHit:                  l_tagDict.append( (d, tagHit) )
+        for group in [self.d_tagReserved, self.d_tagSimpleLookupKeys]:
+            for d in list(group.keys()):
+                l_tagPossibilities:list     = [i for i in group[d] if i in tag]
+                l_tagHit:list               = [i for i in l_tagPossibilities if f'{T}'+i in f'{T}'+tag]
+                tagHit:str                  = l_tagHit[0] if len(l_tagHit) else ''
+                if tagHit:                  l_tagDict.append( (d, tagHit) )
         return l_tagDict
 
     def tag_lookupCore(self, tag:str) -> str:
@@ -318,10 +370,10 @@ class Pftag:
             str: the lookup value for the <tag>
         """
         lookup:str  = ""
-        if 'core' in tagTuple[0]: lookup = self.tag_lookupCore(tagTuple[1])
-        # match tagTuple[0]:
-        #     case 'core':
-        #         lookup  = self.tag_lookupCore(tagTuple[1])
+        if 'core' in tagTuple[0]:
+            lookup = self.tag_lookupCore(tagTuple[1])
+        if tagTuple[0] in list(self.d_tagSimpleLookupKeys.keys()):
+            lookup  = self.d_tagSimpleLookupData[tagTuple[0]][tagTuple[1]]
         return lookup
 
     def tag_process(self, astr:str, *args, **kwargs):
