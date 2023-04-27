@@ -96,6 +96,10 @@ The set of CLI arguments can also be passed in a dictionary of
           --tag <tagString>
            The tag string to process.
 
+           [--lookupDictAdd <listOfDictionaryString>]
+           A string list of additional named lookup dictionary tags and values to
+           add.
+
            [--tagMarker <mark>]
            The marker string that identifies a tag (default "%")
 
@@ -141,9 +145,19 @@ The set of CLI arguments can also be passed in a dictionary of
 Available tags and functions
 ----------------------------
 
+Tags
+~~~~
+
+Additional tag lookup structures can be added with either the CLI or
+directory using the python API, for example:
+
 ::
 
-           TAGS
+   --lookupDictAdd '[{"secrets": {"CUBEuser": "rudolph", "CUBEpassword": "rudolph1234"}}]'
+
+The following tags are internal/reserved:
+
+::
 
                %literal   : simply replace the tag with the word 'literal'.
                             This tag is only useful in conjunction with the
@@ -156,7 +170,13 @@ Available tags and functions
                %arch      : return the '%s' % platform.architecture()
                %timestamp :  return the a timestamp
 
-           FUNCTIONS
+Functions
+~~~~~~~~~
+
+The lookup from any tagged string can be further processed by the
+following functions
+
+::
 
            md5|<chars>         : perform an md5hash on the upstream, limit result
                                  to <chars> characters
@@ -226,8 +246,8 @@ Available tags and functions
                                  strings to resolve which hashes belong to which
                                  subjects.
 
-Functions
----------
+Function detail
+---------------
 
 ::
 
