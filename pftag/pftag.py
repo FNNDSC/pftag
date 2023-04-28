@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-__version__ = '1.3.0'
+__version__ = '1.3.2'
 from    pathlib                 import Path
 
 import  os, sys, json, platform, re
@@ -150,7 +150,7 @@ def parser_JSONinterpret(parser, d_JSONargs):
     list two strings ["--<key>", "<value>"] and then
     argparse.
     """
-    l_args  = []
+    l_args:list  = []
     for k, v in d_JSONargs.items():
         if type(v) == type(True):
             if v: l_args.append('--%s' % k)
@@ -235,13 +235,7 @@ class Pftag:
         # Check for successful addition of possible external lists of dictionary
         # tags
         if self.options.lookupDictAdd:
-            self.envOK = all([list(x.values())[0] \
-                                for x in \
-                                    list(self.newLookupDictionary_add(
-                                        self.options.lookupDictAdd)
-                                    )
-                            ])
-
+            self.envOK  = self.lookupDict_add(self.options.lookupDictAdd)
         self.env_show()
 
     def env_show(self) -> None:
@@ -295,6 +289,15 @@ class Pftag:
             except:
                 lb_status.append({group: False})
         return lb_status
+
+    def lookupDict_add(self, ld_lookup:list[dict]) -> bool:
+        OK:bool = all([list(x.values())[0] \
+                                for x in \
+                                    list(self.newLookupDictionary_add(
+                                        ld_lookup)
+                                    )
+                            ])
+        return OK
 
     def tag_findDict(self, tag:str) -> List[Tuple]:
         """
@@ -571,7 +574,7 @@ class Pftag:
                     prevResult      = result
             elif lt_hit:
                 if f'{T}{lt_hit[0][1]}' in astr:
-                    astr:str    = astr.replace(f'{T}{lt_hit[0][1]}', tagLookup)
+                    astr:str    = astr.replace(f'{T}{lt_hit[0][1]}', tagLookup, 1)
         d_ret['result'] = astr
         return d_ret
 
