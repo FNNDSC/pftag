@@ -194,7 +194,7 @@ package_CLItagsFuncs:str = r"""
             %release   : return the platform.release()
             %machine   : return the platform.machine()
             %arch      : return the '%s' % platform.architecture()
-            %timestamp :  return the a timestamp
+            %timestamp : return the current timestamp
 
         The following functions are available:
 
