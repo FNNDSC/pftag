@@ -105,3 +105,24 @@ def test_timestamp_diff() -> None:
     dt:float                = (dt_t2 - dt_t1).total_seconds()
     diff:int                = round(dt)
     assert diff == 1
+
+def test_addDict_andHash():
+    print(f'Testing adding a new lookup dictionary and also hashing')
+    tagger:pftag.Pftag   = pftag.Pftag({})
+
+    # Add the "credentials" lookup
+    status:bool = tagger.lookupDict_add(
+    [
+        {"credentials":
+            {
+            "user":  "Jack Johnson",
+            "password": "123456"
+            }
+        }
+    ]
+    )
+
+    str_tag:str     = r"'%user' has password '%password' with password hash %password_md5|5_."
+    str_result:str  = r"'Jack Johnson' has password '123456' with password hash e10ad."
+    d_tag:dict = tagger.run(str_tag)
+    assert d_tag['result'] == str_result
