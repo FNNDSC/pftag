@@ -18,8 +18,8 @@ python module. Its main purpose is to parse *template strings*. A
 template string is one where sub-parts of the string are *tokenized* by
 a token marker. These tokens are resolved at execution time.
 
-From a taxonomy perspective, ``pftag`` implements a highly opinionated
-SGML string parser.
+From a taxonomy perspective, ``pftag`` is an example of a string-based
+(somewhat opinionated) SGMLish parser.
 
 Installation
 ------------
@@ -145,15 +145,64 @@ The set of CLI arguments can also be passed in a dictionary of
 Available tags and functions
 ----------------------------
 
-Tags
-~~~~
+Adding New Tags and Lookups
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Additional tag lookup structures can be added with either the CLI or
-directory using the python API, for example:
+directly using the python API, for example:
 
 ::
 
-   --lookupDictAdd '[{"secrets": {"CUBEuser": "rudolph", "CUBEpassword": "rudolph1234"}}]'
+   # CLI
+   pftag --lookupDictAdd '[{"credentials": {"user": "Jack Johnson", "password": "123456"}}]' \
+         --tag "At time %timestamp, user '%user' has password '%password'."
+
+or equivalently in python:
+
+.. code:: python
+
+   from pftag  import pftag
+
+   # Declare the tag processor
+   tagger:pftag.Pftag   = pftag.Pftag({})
+
+   # Add the "credentials" lookup
+   status:bool = tagger.lookupDict_add(
+     [
+       {"credentials":
+           {
+             "user":  "Jack Johnson",
+             "password": "1234567"
+           }
+       }
+     ]
+   )
+
+   str_tag:str = r"At time %timestamp, user '%user' has password '%password'."
+
+   # and... run it!
+   d_tag:dict = tagger.run(str_tag)
+   if d_tag['status']: print(d_tag['result'])
+
+both should result in something similar to:
+
+::
+
+   At time 2023-04-28T11:36:19.448559-04:00, user 'Jack Johnson' has password '1234567'.
+
+For kicks, let’s hash the password to 10 chars:
+
+::
+
+   # CLI
+   pftag --lookupDictAdd '[{"credentials": {"user": "Jack Johnson", "password": "123456"}}]' \
+         --tag "At time %timestamp, user '%user' has password '%password' with password hash %password_md5|10_."
+
+resulting in
+
+::
+
+   At time 2023-04-28T11:57:45.217532-04:00, user 'Jack Johnson' has password '123456' with password hash e10adc3949.
 
 The following tags are internal/reserved:
 
@@ -168,7 +217,7 @@ The following tags are internal/reserved:
                %release   : return the platform.release()
                %machine   : return the platform.machine()
                %arch      : return the '%s' % platform.architecture()
-               %timestamp :  return the a timestamp
+               %timestamp : return the current timestamp
 
 Functions
 ~~~~~~~~~
@@ -249,55 +298,81 @@ following functions
 Function detail
 ---------------
 
+.. _overview-1:
+
+Overview
+~~~~~~~~
+
+In addition to performing a lookup on a template string token, this
+package can also process the lookup value in various ways. These process
+functions follow a Reverse Polish Notation (RPN) schema of
+
 ::
 
-       OVERVIEW
-       In addition to performing a lookup on a template string token, this
-       package can also process the lookup value in various ways. These
-       process functions follow a Reverse Polish Notation (RPN) schema of
+   tag func1(args1) func2(args2) func3(args3) ...
 
-           tag func1(args1) func2(args2) func3(args3) ...
+which reading from left to right is taken as a heap from top to bottom:
 
-       where first the <tag> is looked up, then this lookup is processed by
-       <func1>. The result is then processed by <func2>, and so on and
-       so forth, each functional optionally with a set a arguments.
+::
 
-       This RPN approach also mirrors the standard UNIX piping schema.
+   tag
+   func1(args1)
+   func2(args2)
+   func3(args3)
 
-       A function (or function list) that is to be applied to a <tag> should
-       be connected to the tag with a <funcMarker> string, usually '_'. The
-       final function should end with the same <funcMarker>, so
+where first the ``<tag>`` is looked up, then this lookup is processed by
+``<func1>``. The result is then processed by ``<func2>``, and so on and
+so forth, each functional optionally with a set a arguments. This RPN
+approach also mirrors the standard UNIX piping schema.
 
-           %tag_func1,func2,...,funcN_
+Syntax
+~~~~~~
 
-       will apply the function list in order to the tag value lookup called
-       "tag"; each successive evaluation consuming the result of its
-       predecessor as input.
+A function (or function list) that is to be applied to a ``<tag>`` is
+connected to the tag with a ``<funcMarker>`` string, usually ’\_’. The
+final function should end with the same ``<funcMarker>``, so
 
-       Some functions can accept arguments. Arguments are passed to a function
-       with a <funcArgMarker> string, typically '|', that also separates
-       arguments:
+::
 
-           %tag_func|a1|a2|a3_
+   %tag_func1,func2,...,funcN_
 
-       will pass 'a1', 'a2', and 'a3' as parameters to "func".
+will apply the function list in order to the tag value lookup called
+“tag”; each successive evaluation consuming the result of its
+predecessor as input.
 
-       Finally, several functions can be chained within the '_'...'_' by
-       separating the <func>|<argList> constructs with commas, so pedantically
+Some functions can accept arguments. Arguments are passed to a function
+with a ``<funcArgMarker>`` string, typically ``|``, that also separates
+arguments:
 
-           %tag_func1|a1|a2|a3,func2|b1|b2|b3_
+::
 
-       All these special characters (tag marker, function pre- and post,
-       arg separation, function separation can be overriden. For instance,
-       with a selection of
+   %tag_func|a1|a2|a3_
 
-       --tagMarker "@" --funcMarker "[" --funcArgMarker "," --funcSep "|"
+will pass ``a1``, ``a2``, and ``a3`` as parameters to “func”.
 
-       strings can be specified as
+Finally, several functions can be chained within the ``_``\ …\ ``_`` by
+separating the ``<func>|<argList>`` constructs with commas, so
+pedantically
 
-           @tag[func,a1,a2,a3|func2,b1,b2,b3[
+::
 
-       where preference/legibilty is left to the user
+   %tag_func1|a1|a2|a3,func2|b1|b2|b3_
+
+All these special characters (tag marker, function pre- and post, arg
+separation, function separation) can be overriden. For instance, with a
+selection of
+
+::
+
+   --tagMarker "@" --funcMarker "[" --funcArgMarker "," --funcSep "|"
+
+strings can be specified as
+
+::
+
+   @tag[func,a1,a2,a3|func2,b1,b2,b3[
+
+where preference/legibilty is left to the user.
 
 Development
 -----------
