@@ -1,617 +1,337 @@
-#!/usr/bin/env python
-__version__ = '1.3.2'
-from    pathlib                 import Path
+"""The pftag engine: find the tags in a template and replace each with its value.
 
-import  os, sys, json, platform, re
-os.environ['XDG_CONFIG_HOME'] = '/tmp'
+A template is ordinary text with tags in it. A tag is the tag marker, a name, and
+optionally a function chain between two function markers::
 
-import  pudb
-from    pudb.remote             import set_trace
+    %name
+    %name_fn_
+    %name_fn|arg|arg,fn2|arg_
 
-from    concurrent.futures      import ThreadPoolExecutor
-from    threading               import current_thread
+The engine scans the text once, left to right. At a marker it matches the longest
+known name (from the core tags and the registered lookups); a name it does not know
+is left in the text as written, unless ``strict`` is set. A known tag's value is passed
+through its functions in order and the result replaces the tag. Backslash before a
+marker makes it literal, inside or outside a tag.
 
-from    datetime                import datetime, timezone
+Key components:
+    - Pftag: the engine; ``lookup_add`` registers names, ``tag_process`` runs a template
+    - CORE_TAGS: the names every engine knows (``timestamp``, ``platform``, ...)
+    - coreTag_value: their values
 
-from    typing                  import Any, Callable, Tuple, List
-from    faker                   import  Faker
+Typical usage:
+    tagger = Pftag(TagOptions(lookups={"run": {"subject": "sub-01"}}))
+    tagger("%subject_upper_-%timestamp_chrplc|:|-_.log").result
 
-import  logging
-import  hashlib
+Dependencies:
+    - pftag.models, pftag.functions
+"""
 
-import  math
-from    argparse                import  Namespace, ArgumentParser
-from    argparse                import  RawTextHelpFormatter
+from __future__ import annotations
 
-from    .                       import  data
+import json
+import logging
+import platform
+import re
+from datetime import UTC, datetime
 
-# Turn off logging for the 'faker' module and create a class instance
-# of the object
-fakelogger: logging.Logger  = logging.getLogger('faker')
-fakelogger.propagate        = False
-fake:Faker                  = Faker()
+from pftag.functions import FunctionError, FunctionRegistry
+from pftag.models import ESCAPE, FunctionCall, TagOptions, TagResult, TagToken
 
+logger: logging.Logger = logging.getLogger("pftag")
 
-def parser_setup(str_desc) -> ArgumentParser:
-    parser:ArgumentParser = ArgumentParser(
-                description         = str_desc,
-                formatter_class     = RawTextHelpFormatter
-            )
+CORE_LOOKUP: str = "core"
+CORE_TAGS: tuple[str, ...] = ("literal", "os", "platform", "release", "machine", "arch", "timestamp")
+IDENTIFIER: re.Pattern[str] = re.compile(r"[A-Za-z][A-Za-z0-9]*")
+FUNCTION_NAME: re.Pattern[str] = re.compile(r"[A-Za-z][A-Za-z0-9]*")
 
-    parser.add_argument(
-                '--version',
-                default = False,
-                dest    = 'b_version',
-                action  = 'store_true',
-                help    = 'print version info'
-    )
-    parser.add_argument(
-                '--man',
-                default = False,
-                action  = 'store_true',
-                help    = 'show a man page'
-    )
-    parser.add_argument(
-                '--osenv',
-                default = False,
-                action  = 'store_true',
-                help    = 'show the base os environment'
-    )
-    parser.add_argument(
-                '--synopsis',
-                default = False,
-                action  = 'store_true',
-                help    = 'show a synopsis'
-    )
-    parser.add_argument(
-                '--inputdir',
-                default = './',
-                help    = 'optional directory specifying extra input-relative data'
-    )
-    parser.add_argument(
-                '--outputdir',
-                default = './',
-                help    = 'optional directory specifying location of any output data'
-    )
-    parser.add_argument(
-                '--lookupDictAdd',
-                default = '',
-                help    = 'simple named dictionary lookups'
-    )
-    parser.add_argument(
-                '--tag',
-                default = '',
-                help    = 'tag string to process'
-    )
-    parser.add_argument(
-                '--tagMarker',
-                default = '%',
-                help    = 'the marker string that identifies a tag (default "%")'
-    )
-    parser.add_argument(
-                '--funcMarker',
-                default = '_',
-                help    = 'the marker string that pre- and post marks a function (default "_")'
-    )
-    parser.add_argument(
-                '--funcArgMarker',
-                default = '|',
-                help    = 'the marker string between function arguments and also between arg list and function (default "|")'
-    )
-    parser.add_argument(
-                '--funcSep',
-                default = ',',
-                help    = 'the separation string between successive function/argument constructs (default ",")'
-    )
-    parser.add_argument(
-                '--verbosity',
-                default = '0',
-                help    = 'verbosity level of app'
-    )
-    parser.add_argument(
-                "--debug",
-                help    = "if true, toggle telnet pudb debugging",
-                dest    = 'debug',
-                action  = 'store_true',
-                default = False
-    )
-    parser.add_argument(
-                "--debugTermSize",
-                help    = "the terminal 'cols,rows' size for debugging",
-                default = '253,62'
-    )
-    parser.add_argument(
-                "--debugPort",
-                help    = "the debugging telnet port",
-                default = '7900'
-    )
-    parser.add_argument(
-                "--debugHost",
-                help    = "the debugging telnet host",
-                default = '0.0.0.0'
-    )
-    return parser
 
-def parser_interpret(parser, *args):
-    """
-    Interpret the list space of *args, or sys.argv[1:] if
-    *args is empty
-    """
-    if len(args):
-        args    = parser.parse_args(args[0])
-    else:
-        args    = parser.parse_args(sys.argv[1:])
-    return args
-
-def parser_JSONinterpret(parser, d_JSONargs):
-    """
-    Interpret a JSON dictionary in lieu of CLI.
-    For each <key>:<value> in the d_JSONargs, append to
-    list two strings ["--<key>", "<value>"] and then
-    argparse.
-    """
-    l_args:list  = []
-    for k, v in d_JSONargs.items():
-        if type(v) == type(True):
-            if v: l_args.append('--%s' % k)
-            continue
-        l_args.append('--%s' % k)
-        l_args.append('%s' % v)
-    return parser_interpret(parser, l_args)
-
-class Pftag:
-
-    def env_setup(self, options: Namespace) -> bool:
-        """
-        Setup the environment
-
-        Args:
-            options (Namespace):    options passed from the CLI caller
-        """
-        status  : bool          = True
-        options.inputdir        = Path(options.inputdir)
-        options.outputdir       = Path(options.outputdir)
-        self.env.inputdir       = options.inputdir
-        self.env.outputdir      = options.outputdir
-        self.env.debug_setup(
-                    debug       = options.debug,
-                    termsize    = options.debugTermSize,
-                    port        = options.debugPort,
-                    host        = options.debugHost
-        )
-        return status
-
-    def __init__(self, options, *args, **kwargs):
-        """
-        constructor
-
-        Responsible primarily for setting up the client connection
-        to the pftel server.
-
-        Possible TODO? How to check _elegantly_ on dead server?
-        """
-        global Env
-        self.env:data.env                   = data.env()
-
-        self.d_tagReserved:dict[str, list[str]]                  = {
-            'core'      : ['literal',
-                           'os',
-                           'platform',
-                           'release',
-                           'machine',
-                           'arch',
-                           'timestamp']
-        }
-
-        # Simple lookup structures/handling. These two dictionaries
-        # house "simple" lookup tag structures. A "simple" lookup is
-        # a named dictionary whose keys are the tags, and whose values
-        # are the lookup results.
-        #
-        # Typically, these are passed in the CLI --lookupDictAdd value.
-        self.d_tagSimpleLookupKeys:dict[str, list[str]]         = {
-        }
-        self.d_tagSimpleLookupData:dict[str, dict]              = {
-        }
-
-        # If the <options> is a dictionary, then we interpret this as if
-        # it were the CLI (instead of the real CLI) and convert to a
-        # namespace
-        if type(options) is dict:
-            parser:ArgumentParser           = parser_setup('Setup client using dict')
-            options:Namespace               = parser_JSONinterpret(parser, options)
-        if type(options) is Namespace:
-            self.options:Namespace          = options
-            self.env.options                = options
-            self.envOK:bool                 = True
-        if not self.env_setup(options):
-            self.env.ERROR("Env setup failure, exiting...")
-            self.envOK                  = False
-        self.str_tagMarker:str              = options.tagMarker     # '%
-        self.str_funcMarker:str             = options.funcMarker    # '_'
-        self.str_funcArgSep:str             = options.funcArgMarker # '|'
-        self.str_funcSep:str                = options.funcSep       # ','
-
-        # Check for successful addition of possible external lists of dictionary
-        # tags
-        if self.options.lookupDictAdd:
-            self.envOK  = self.lookupDict_add(self.options.lookupDictAdd)
-        self.env_show()
-
-    def env_show(self) -> None:
-        """
-        Perform some setup
-
-        Args:
-            None (internal self)
-
-        Returns:
-            None
-        """
-
-        if int(self.options.verbosity) < 4: return
-
-        self.self.env.DEBUG("app arguments...", level = 3)
-        for k,v in self.options.__dict__.items():
-             self.self.env.DEBUG("%25s:  [%s]" % (k, v), level = 3)
-        self.self.env.DEBUG("", level = 3)
-
-        if self.options.osenv:
-            self.self.env.DEBUG("base environment...")
-            for k,v in os.environ.items():
-                self.self.env.DEBUG("%25s:  [%s]" % (k, v), level = 3)
-            self.self.env.DEBUG("")
-
-    def newLookupDictionary_add(self, ld_data:list[dict]) -> list[bool]:
-        """
-        Add new "named" lookup tag dictionary values
-
-        Args:
-            ld_data (list[dict]): a list of named dictionaries with
-                                  lookup key/value tags
-
-        Returns:
-            bool (list[bool]): for each group, a bool status dictionary
-        """
-        try:
-            ld_data = json.loads(ld_data)
-        except:
-            pass
-        lb_status:list[dict]    = []
-        l_keys:list     = [list(x.keys())[0]    for x in ld_data]
-        l_lookups:list  = [list(x.values())[0]  for x in ld_data]
-        l_tags:list     = [list(y.keys())       for y in l_lookups]
-        for group,tags,data in zip(l_keys, l_tags, l_lookups):
-            try:
-                self.d_tagSimpleLookupKeys[group] = tags
-                self.d_tagSimpleLookupData[group] = data
-                lb_status.append({group: True})
-            except:
-                lb_status.append({group: False})
-        return lb_status
-
-    def lookupDict_add(self, ld_lookup:list[dict]) -> bool:
-        OK:bool = all([list(x.values())[0] \
-                                for x in \
-                                    list(self.newLookupDictionary_add(
-                                        ld_lookup)
-                                    )
-                            ])
-        return OK
-
-    def tag_findDict(self, tag:str) -> List[Tuple]:
-        """
-        For a given <tag> superstring, determine if any internal dictionaries
-        contain a token within the <tag>. If found, add the dictionary name and
-        token to a tuple list, and eventually return a list of tuples of
-        (<dict>, <tag>) containing hits.
-
-        For example, imagine that the string to analyze is
-
-                %platform-name-os
-
-        where the %platform is a tag to be substituted. Imagine further that
-        'name' and 'os' are valid tags, but note that they do not have the
-        leading tag marker, '%', and so should be literals (i.e. unprocessed).
-
-        Give an tag superstring of 'platform-name-os' this method will
-        correctly determine that 'platform' is the tag to analyze and also
-        return the internal dictionary name containing this tag.
-
-        Args:
-            tag (str): the "tag" to search
-
-        Returns:
-            list[Tuple]: a list of tuples with the housing dictionary
-            and tag within that dictionary
-        """
-        T:str                   = self.str_tagMarker
-        l_tagPossibilities:list = []    # Is the tag in one of the possible dictionaries?
-        l_tagHit:list           = []    # Which tag, *exactly*, is sought in the possibilities?
-        tagHit:str              = ''    # This is it!
-        l_tagDict:list          = []    # A list of tuples of (<dict>, <tag>)
-        for group in [self.d_tagReserved, self.d_tagSimpleLookupKeys]:
-            for d in list(group.keys()):
-                l_tagPossibilities:list     = [i for i in group[d] if i in tag]
-                l_tagHit:list               = [i for i in l_tagPossibilities if f'{T}'+i in f'{T}'+tag]
-                tagHit:str                  = l_tagHit[0] if len(l_tagHit) else ''
-                if tagHit:                  l_tagDict.append( (d, tagHit) )
-        return l_tagDict
-
-    def tag_lookupCore(self, tag:str) -> str:
-        """Lookup a tag in the "core" dictionary.
-
-        Args:
-            tag (str): the tag to lookup
-
-        Returns:
-            str: the string lookup
-        """
-        timenow:Callable[[], str]       = lambda: datetime.now(timezone.utc).astimezone().isoformat()
-        lookup:str  = ""
-        tag:str     = tag.lower()
-        if 'literal'        in tag: lookup  = 'literal'
-        if 'os'             in tag: lookup  = os.name
-        if 'platform'       in tag: lookup  = platform.system()
-        if 'release'        in tag: lookup  = platform.release()
-        if 'machine'        in tag: lookup  = platform.machine()
-        if 'arch'           in tag: lookup  = '%s-%s' % platform.architecture()
-        if 'timestamp'      in tag: lookup  = timenow()
-        return lookup
-
-    def tag_lookup(self, tagTuple:tuple) -> str:
-        """
-        Main dispatching method for looking up a tag across a variety of
-        possible use cases (<dictionaryName>).
-
-        (Note, match not used for python < 3.10 compatibility)
-
-        Args:
-            tagTuple (tuple): a tuple of <dictionaryName> and <tag> to lookup
-
-        Returns:
-            str: the lookup value for the <tag>
-        """
-        lookup:str  = ""
-        if 'core' in tagTuple[0]:
-            lookup = self.tag_lookupCore(tagTuple[1])
-        if tagTuple[0] in list(self.d_tagSimpleLookupKeys.keys()):
-            lookup  = self.d_tagSimpleLookupData[tagTuple[0]][tagTuple[1]]
-        return lookup
-
-    def tag_process(self, astr:str, *args, **kwargs):
-        """
-        This method processes a string that contains "%<tag>" tokens in a
-        variety of ways. Various %<tags> are understood, for example:
-
-            * %timestamp     - a timestamp
-            * %os            - the OS name
-            * %platform      - the platform system
-            * %release       - the platform release
-
-        For example, an input tag that is specified as the following string:
-
-                    %os-%platform-output.txt
-
-        will be parsed to
-
-                    posix-Linux-6.2.2-zen1-1-zen-output.txt
-
-        It is also possible to apply certain permutations/functions
-        to a tag. For example, a function is specified as
-
-                %<tag>_<funcName>|<arg1>|<arg2>...
-
-        which will apply the <funcName> (with <arg1>, <arg2>) to the
-        lookup value of <tag>
-        """
-
-        def echo(funcArgs:str, strproc:str) -> str:
-            """
-            Simply replace the tag with an "echo" passed
-            in args.
-
-            This is useful to inject a client side string
-            into the superstring payload
-
-            Args:
-                funcArgs (str): the function_and_args construct
-                strproc (str): the string to process
-
-            Returns:
-                str: the processed string
-            """
-            F:str               = self.str_funcMarker
-            A:str               = self.str_funcArgSep
-            l_args:list[str]    = funcArgs.split(f'{A}')
-            value:str           = strproc.split(f'{F}')[0]
-            result:str          = l_args[1]
-
-            return result
-
-        def strmsk(funcArgs:str, strproc:str) -> str:
-            """
-            string mask
-            """
-            F:str               = self.str_funcMarker
-            A:str               = self.str_funcArgSep
-            l_args:list[str]    = funcArgs.split(f'{A}')
-            value:str           = strproc.split(f'{F}')[0]
-            str_msk:str         = l_args[1]
-            l_n:list            = []
-            result:str          = ""
-
-            for i, j in zip(list(value), list(str_msk)):
-                if j == '*':    l_n.append(i)
-                else:           l_n.append(j)
-            result  = ''.join(l_n)
-            return result
-
-        def md5(funcArgs:str, strproc:str) -> str:
-            """
-            Apply an md5 hash on the <astr>. A single argument
-            is accepted, denoting the length of the return hash.
-
-            Args:
-                funcArgs (str): the function_and_args construct
-                strproc (str): the string to process
-
-            Returns:
-                str: the processed string
-            """
-            F:str               = self.str_funcMarker
-            A:str               = self.str_funcArgSep
-            l_args:list[str]    = funcArgs.split(f'{A}')
-            value:str           = strproc.split(f'{F}')[0]
-            chars:str               = ''
-            result:str              = hashlib.md5(value.encode('utf-8')).hexdigest()
-            if len(l_args) > 1:
-                chars       = l_args[1]
-                result:str  = result[0:int(chars)]
-            return result
-
-        def chrplc(funcArgs:str , strproc:str)-> str:
-            """
-            Replace characters in <astr>
-
-            Args:
-                funcArgs (str): the function_and_args construct
-                strproc (str): the string to process
-
-            Returns:
-                str: the processed string
-            """
-            F:str               = self.str_funcMarker
-            A:str               = self.str_funcArgSep
-            l_args:list[str]    = funcArgs.split(f'{A}')
-            value:str           = strproc.split(f'{F}')[0]
-            result:str              = re.sub(f'{l_args[1]}', f'{l_args[2]}', value)
-            return result
-
-        def convertToNumber (s:str) -> int:
-            return int.from_bytes(s.encode(), 'little')
-
-        def convertFromNumber (n:int)-> bytes:
-            return n.to_bytes(math.ceil(n.bit_length() / 8), 'little').decode()
-
-        def dcmname(funcArgs:str, strproc) -> str:
-            """
-            replace <strproc> with name in DICOM conventions
-
-            If passed a string in the "function" arguments, this is used to seed
-            the name caller. If the same argument is used for additional calls to
-            this sub-function, then the returned name will be identical.
-
-            Args:
-                funcArgs (str): the function_and_args construct
-                strproc (str): the string to process
-
-            Returns:
-                str: the processed string
-            """
-            # pudb.set_trace()
-            F:str               = self.str_funcMarker
-            A:str               = self.str_funcArgSep
-            l_args:list[str]    = funcArgs.split(f'{A}')
-            value:str           = strproc.split(f'{F}')[0]
-            result:str          = ""
-            if len(l_args) >  1:
-                randSeed:int    = convertToNumber(l_args[1])
-                Faker.seed(randSeed)
-            str_firstLast:str   = fake.name()
-            l_firstLast:list    = str_firstLast.split()
-            str_first:str       = l_firstLast[0]
-            str_last:str        = l_firstLast[1]
-            result              = '%s^%s' % (str_last.upper(), str_first.upper())
-            if len(l_args) > 2:
-                result += l_args[2]
-            return result
-
-        str_replace:str         = ''        # the lookup/processed tag value
-        l_tags:list             = []        # the input string split by '%'
-        func:str                = ''        # the function to apply
-        tag:str                 = ''        # the tag in the funcTag combo
-        result:str              = ''        # result of any applied function
-        prevResult:str          = ''        # previous function stack result
-        tagLookup:str           = ''        # the lookup value for the tag
-        d_ret:dict[str, Any]    = {
-            'status':           False,
-            'funcApplied':      [],
-            'result':           astr
-        }
-        T:str                   = self.str_tagMarker
-        F:str                   = self.str_funcMarker
-        S:str                   = self.str_funcSep
-
-        if not f'{T}' in astr: return d_ret
-        d_ret['status']     = True
-        l_tags:list         = astr.split(f'{T}')[1:]
-        for tagFunc in l_tags:
-            l_tagFunc:list  = tagFunc.split(f'{F}')
-            if len(l_tagFunc) > 1:  tag, func = (l_tagFunc[0], l_tagFunc[1])
-            else:                   tag, func = (l_tagFunc[0], "")
-            lt_hit:List[Tuple]  = self.tag_findDict(tag)
-            tagLookup           = tag if not lt_hit else self.tag_lookup(lt_hit[0])
-            if func:
-                for f in func.split(f'{S}'):
-                    tagFunc         = tagFunc.replace(f'{tag}', tagLookup)
-                    b_funcDo:bool   = False
-                    if 'echo'       in f: result  = echo(f, tagFunc)        ; b_funcDo  = True
-                    if 'md5'        in f: result  = md5(f, tagFunc)         ; b_funcDo  = True
-                    if 'strmsk'     in f: result  = strmsk(f, tagFunc)      ; b_funcDo  = True
-                    if 'chrplc'     in f: result  = chrplc(f, tagFunc)      ; b_funcDo  = True
-                    if 'dcmname'    in f: result  = dcmname(f, str_replace) ; b_funcDo  = True
-                    d_ret['funcApplied'].append(b_funcDo)
-                    if b_funcDo:
-                        if f'{T}{tag}{F}{f},'       in astr:    astr:str    = astr.replace(f'{T}{tag}{F}{f},', f'{result}{F}')
-                        if f'{T}{tag}{F}{f}{F}'     in astr:    astr:str    = astr.replace(f'{T}{tag}{F}{f}{F}', result)
-                        if f'{prevResult}{F}{f},'   in astr:    astr:str    = astr.replace(f'{prevResult}{F}{f},', f'{result}{F}')
-                        if f'{prevResult}{F}{f}{F}' in astr:    astr:str    = astr.replace(f'{prevResult}{F}{f}{F}', result)
-                        if f'{tagLookup}{F}{f},'    in tagFunc: tagFunc:str = tagFunc.replace(f'{tagLookup}{F}{f},', f'{result}{F}')
-                        if f'{tagLookup}{F}{f}{F}'  in tagFunc: tagFunc:str = tagFunc.replace(f'{tagLookup}{F}{f}{F}', result)
-                        if f'{prevResult}{F}{f},'   in tagFunc: tagFunc:str = tagFunc.replace(f'{prevResult}{F}{f},', f'{result}{F}')
-                        if f'{prevResult}{F}{f}{F}' in tagFunc: tagFunc:str = tagFunc.replace(f'{prevResult}{F}{f}{F}', result)
-                    prevResult      = result
-            elif lt_hit:
-                if f'{T}{lt_hit[0][1]}' in astr:
-                    astr:str    = astr.replace(f'{T}{lt_hit[0][1]}', tagLookup, 1)
-        d_ret['result'] = astr
-        return d_ret
-
-    def run(self, tag:str) -> dict:
-        """Main "run" method
-
-        Args:
-            tag (str): the tag string to process
-
-        Returns:
-            dict: a status and result dictionary
-        """
-        b_status:bool       = False
-        if not self.envOK:  return {'status': b_status}
-
-        result:dict         = self.tag_process(tag)
-        return result
-
-    def __call__(self, tag:str, *args: Any, **kwds: Any) -> dict:
-        self.options.tag = tag
-        return self.run(tag)
-
-def timestamp_dt(str_datetime:str) -> datetime:
-    """
-    Accept a string generated by the %timestamp tag and return a
-    datetime object
+def coreTag_value(name: str) -> str:
+    """The value of a core tag, computed when asked.
 
     Args:
-        str_datetime (str): a string generated by %timestamp
+        name: one of ``CORE_TAGS``.
 
     Returns:
-        datetime: a datetime object of the input
+        ``literal`` for ``literal``; the OS name, platform system, release, machine
+        and architecture from ``platform``; the current local time in ISO 8601 with
+        offset for ``timestamp``.
+
+    Raises:
+        KeyError: for a name that is not a core tag.
     """
-    dt:datetime     = None
-    try:
-        dt = datetime.strptime(str_datetime, '%Y-%m-%dT%H:%M:%S.%f%z')
-    except:
-        # py36 backwards compatibility
-        dt = datetime.strptime(str_datetime[:-6], '%Y-%m-%dT%H:%M:%S.%f')
-    return dt
+    match name:
+        case "literal":
+            return "literal"
+        case "os":
+            return __import__("os").name
+        case "platform":
+            return platform.system()
+        case "release":
+            return platform.release()
+        case "machine":
+            return platform.machine()
+        case "arch":
+            return "-".join(platform.architecture())
+        case "timestamp":
+            return datetime.now(UTC).astimezone().isoformat()
+        case _:
+            raise KeyError(name)
+
+
+class Pftag:
+    """Find tags in templates and replace them with their values.
+
+    Attributes:
+        options: the markers, lookups and strictness in force.
+        registry: the functions tags can be passed through.
+        lookups: name to value, flattened across every registered dictionary; a
+            later registration of the same name wins.
+        lookupNames: dictionary name to its tag names, as registered.
+
+    Example:
+        >>> Pftag()("%literal_echo|hi,upper_")  # doctest: +SKIP
+        TagResult(status=True, result='HI', ...)
+    """
+
+    def __init__(self, options: TagOptions | None = None, registry: FunctionRegistry | None = None) -> None:
+        self.options: TagOptions = options if options is not None else TagOptions()
+        self.registry: FunctionRegistry = registry if registry is not None else FunctionRegistry()
+        self.lookups: dict[str, str] = {}
+        self.lookupNames: dict[str, list[str]] = {CORE_LOOKUP: list(CORE_TAGS)}
+        for name, values in self.options.lookups.items():
+            self.lookup_add(name, values)
+
+    def lookup_add(self, name: str, values: dict[str, str]) -> None:
+        """Register a named dictionary of tags.
+
+        Args:
+            name: the dictionary's name, for reporting.
+            values: tag name to value. Values are stringified.
+
+        Raises:
+            ValueError: if a tag name is empty, or contains a marker or the escape.
+        """
+        reserved: str = (
+            self.options.tagMarker
+            + self.options.funcMarker
+            + self.options.funcArgMarker
+            + self.options.funcSep
+            + ESCAPE
+        )
+        for tag in values:
+            if not tag or any(char in reserved for char in tag):
+                raise ValueError(f"tag name {tag!r} in lookup {name!r} is empty or contains a marker")
+        self.lookupNames[name] = list(values)
+        for tag, value in values.items():
+            self.lookups[tag] = str(value)
+
+    def lookups_addFromJson(self, text: str) -> None:
+        """Register lookups given as JSON, as ``--lookupDictAdd`` passes them.
+
+        Args:
+            text: ``{"name": {"tag": "value"}}``, or the 1.x list form
+                ``[{"name": {"tag": "value"}}, ...]``.
+
+        Raises:
+            ValueError: if the JSON does not have one of those shapes.
+        """
+        try:
+            parsed: object = json.loads(text)
+        except json.JSONDecodeError as err:
+            raise ValueError(f"lookups are not valid JSON: {err}") from err
+        groups: list[dict[str, dict[str, str]]]
+        if isinstance(parsed, dict):
+            groups = [parsed]
+        elif isinstance(parsed, list):
+            groups = parsed
+        else:
+            raise ValueError("lookups must be a JSON object or a list of objects")
+        for group in groups:
+            if not isinstance(group, dict):
+                raise ValueError("each lookup group must be a JSON object")
+            for name, values in group.items():
+                if not isinstance(values, dict):
+                    raise ValueError(f"lookup {name!r} must map tag names to values")
+                self.lookup_add(str(name), {str(k): str(v) for k, v in values.items()})
+
+    def tagNames(self) -> list[str]:
+        """Every known tag name, longest first, so matching prefers the longest."""
+        names: set[str] = set(self.lookups) | set(CORE_TAGS)
+        return sorted(names, key=lambda name: (-len(name), name))
+
+    def value_lookup(self, name: str) -> str | None:
+        """The value of a known tag, or None.
+
+        A registered lookup wins over a core tag of the same name.
+        """
+        if name in self.lookups:
+            return self.lookups[name]
+        if name in CORE_TAGS:
+            return coreTag_value(name)
+        return None
+
+    def name_match(self, template: str, start: int) -> str | None:
+        """The longest known tag name beginning at ``start``, or None."""
+        for name in self.tagNames():
+            if template.startswith(name, start):
+                return name
+        return None
+
+    def chain_parse(self, template: str, start: int) -> tuple[list[FunctionCall], int] | None:
+        """Parse a function chain that opened just before ``start``.
+
+        Args:
+            template: the text.
+            start: the index after the opening function marker.
+
+        Returns:
+            The calls and the index after the closing function marker, or None if
+            the chain is malformed or never closed.
+        """
+        argMarker: str = self.options.funcArgMarker
+        sep: str = self.options.funcSep
+        close: str = self.options.funcMarker
+        calls: list[FunctionCall] = []
+        index: int = start
+        while True:
+            nameMatch: re.Match[str] | None = FUNCTION_NAME.match(template, index)
+            if nameMatch is None:
+                return None
+            call: FunctionCall = FunctionCall(nameMatch.group())
+            index = nameMatch.end()
+            while index < len(template) and template[index] == argMarker:
+                arg, index = self.argument_read(template, index + 1)
+                call.args.append(arg)
+            calls.append(call)
+            if index >= len(template):
+                return None
+            if template[index] == sep:
+                index += 1
+                continue
+            if template[index] == close:
+                return calls, index + 1
+            return None
+
+    def argument_read(self, template: str, start: int) -> tuple[str, int]:
+        """Read one function argument.
+
+        An argument runs to the next argument marker, function separator or closing
+        function marker; a backslash before any of those keeps it in the argument.
+
+        Args:
+            template: the text.
+            start: where the argument begins.
+
+        Returns:
+            The unescaped argument and the index of the character that ended it.
+        """
+        stops: str = self.options.funcArgMarker + self.options.funcSep + self.options.funcMarker
+        out: list[str] = []
+        index: int = start
+        while index < len(template):
+            char: str = template[index]
+            if char == ESCAPE and index + 1 < len(template) and template[index + 1] in stops + ESCAPE:
+                out.append(template[index + 1])
+                index += 2
+                continue
+            if char in stops:
+                break
+            out.append(char)
+            index += 1
+        return "".join(out), index
+
+    def tag_process(self, template: str) -> TagResult:
+        """Replace every tag in a template.
+
+        Args:
+            template: the text to process.
+
+        Returns:
+            The processed text and an account of every tag met. ``status`` is False
+            when ``strict`` is set and a tag was unknown, or when a function failed;
+            a failed tag is left as written.
+        """
+        result: TagResult = TagResult(status=True, result="", template=template)
+        marker: str = self.options.tagMarker
+        markers: str = marker + self.options.funcMarker + self.options.funcArgMarker + self.options.funcSep
+        out: list[str] = []
+        index: int = 0
+        while index < len(template):
+            char: str = template[index]
+            if char == ESCAPE and index + 1 < len(template) and template[index + 1] in markers + ESCAPE:
+                out.append(template[index + 1])
+                index += 2
+                continue
+            if char != marker:
+                out.append(char)
+                index += 1
+                continue
+            token: TagToken | None = self.token_read(template, index)
+            if token is None:
+                out.append(char)
+                index += 1
+                continue
+            result.tagsFound.append(token.name)
+            if not token.known:
+                result.unknownTags.append(token.name)
+                if self.options.strict:
+                    result.status = False
+                    result.errors.append(f"unknown tag {marker}{token.name}")
+                out.append(token.text(template))
+            else:
+                out.append(self.token_render(token, template, result))
+            index = token.end
+        result.result = "".join(out)
+        return result
+
+    def token_read(self, template: str, start: int) -> TagToken | None:
+        """Read the tag that opens at ``start``.
+
+        Returns:
+            A known token with its function chain; an unknown token spanning the
+            identifier after the marker; or None when no identifier follows the
+            marker, which makes the marker literal.
+        """
+        nameStart: int = start + 1
+        name: str | None = self.name_match(template, nameStart)
+        if name is None:
+            identifier: re.Match[str] | None = IDENTIFIER.match(template, nameStart)
+            if identifier is None:
+                return None
+            return TagToken(identifier.group(), [], start, identifier.end(), known=False)
+        end: int = nameStart + len(name)
+        functions: list[FunctionCall] = []
+        if end < len(template) and template[end] == self.options.funcMarker:
+            parsed: tuple[list[FunctionCall], int] | None = self.chain_parse(template, end + 1)
+            if parsed is not None:
+                functions, end = parsed
+        return TagToken(name, functions, start, end, known=True)
+
+    def token_render(self, token: TagToken, template: str, result: TagResult) -> str:
+        """The text a known token becomes.
+
+        Args:
+            token: the token.
+            template: the text, for the fallback when a function fails.
+            result: the running result, which records applied functions and errors.
+
+        Returns:
+            The value after its functions, or the tag as written if a function failed.
+        """
+        value: str | None = self.value_lookup(token.name)
+        if value is None:
+            return token.text(template)
+        for call in token.functions:
+            try:
+                value = self.registry.apply(call.name, value, call.args)
+            except FunctionError as err:
+                result.status = False
+                result.errors.append(f"{token.text(template)}: {err}")
+                logger.error("%s", err)
+                return token.text(template)
+            result.functionsApplied.append("|".join([call.name, *call.args]))
+        return value
+
+    def __call__(self, template: str) -> TagResult:
+        """``tag_process`` as a call."""
+        return self.tag_process(template)

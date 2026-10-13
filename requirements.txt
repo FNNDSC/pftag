@@ -1,4 +1,0 @@
-pudb
-loguru
-faker
-pytest-mock

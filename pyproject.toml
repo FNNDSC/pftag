@@ -1,0 +1,47 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pftag"
+dynamic = ["version"]
+description = "A string template processor: %tags looked up at run time, optionally passed through chained functions"
+readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "FNNDSC", email = "dev@babyMRI.org" }]
+requires-python = ">=3.11"
+dependencies = ["faker>=20"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
+
+[project.urls]
+Homepage = "https://github.com/FNNDSC/pftag"
+
+[project.scripts]
+pftag = "pftag.__main__:main"
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "ruff>=0.6"]
+
+[tool.setuptools]
+packages = ["pftag"]
+
+[tool.setuptools.dynamic]
+version = { attr = "pftag.__version__" }
+
+[tool.ruff]
+target-version = "py311"
+line-length = 110
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "C4", "SIM", "RUF"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

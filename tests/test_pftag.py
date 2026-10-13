@@ -1,128 +1,186 @@
-from pathlib        import Path
-from pftag          import pftag
-from pftag.__main__ import main
-from pftag.pftag    import parser_setup, parser_JSONinterpret, parser_interpret, timestamp_dt
-from argparse       import  ArgumentParser, Namespace
-import  os
-os.environ['XDG_CONFIG_HOME'] = '/tmp'
-import              pudb
-import              pytest
-from datetime       import datetime
-import              time
-from typing         import Any
+"""Tests for the pftag engine: tokenizer, lookups, functions, chains, escapes."""
 
-@pytest.fixture(params = ['literal', 'os'])
-def IOcomparisons_setup(request) -> tuple[str, str]:
-    """
-    Setup some straightforward inputs and expected output
-    results
+from __future__ import annotations
 
-    Args:
-        request (_type_): internal pytest request
+import hashlib
+import re
 
-    Returns:
-        tuple[str, str]: for each tag, return the input and expected result
-    """
-    input:str
-    output:str
-    match request.param:
-        case 'literal':
-            input   = r'Hello, %literal_echo|Mars_!'
-            output  = r'Hello, Mars!'
-        case 'os':
-            input   = r'This os is %os'
-            output  = r'This os is posix'
-    print(f'Testing {input} transformed to {output}')
-    return input, output
+import pytest
 
-def test_main(mocker, IOcomparisons_setup) -> None:
-    """
-    Simulated test run of the app using CLI.
-    """
-    print(f'Testing IO comparisons')
-    input:str           = IOcomparisons_setup[0]
-    output:str          = IOcomparisons_setup[1]
-    mock_print:Any      = mocker.patch('builtins.print')
-    main(['--tag', input])
-    mock_print.assert_called_once_with(output)
+from pftag.functions import FunctionError, FunctionRegistry
+from pftag.models import TagOptions
+from pftag.pftag import CORE_TAGS, Pftag, coreTag_value
 
-def test_noCLIinit() -> None:
-    """
-    Test when initializing the tagger object with an empty dictionary,
-    i.e. simulating the case where no CLI is interpreted.
-    """
-    # Here we create a tagger without the CLI parser
-    # and run a tag lookup on a passed string. For the
-    # sake of expediency, the original test string is
-    # not transportable, so a simplified version is provided
-    # but the original kept for reference
-    print(f'Testing init with no CLI')
-    str_tagNonTransportable:str =  r'run-%timestamp_chrplc|:|-_-OS-%platform-%NAME_dcmname_-%literal_echo|Subject4,md5|5_.log'
-    str_tag:str = r'run-%2023-03-12T17:17:40.997150-04:00_chrplc|:|-_-OS-Linux-%NAME_dcmname|Patient_-%literal_echo|Subject4,md5|5_.log'
-    tagger:pftag.Pftag     = pftag.Pftag({})
 
-    d_tag:dict             = tagger(str_tag)
-    assert d_tag['result'] == "run-2023-03-12T17-17-40.997150-04-00-OS-Linux-ROSALES^ANDREW-37149.log"
+def tagger_make(**lookups: dict[str, str]) -> Pftag:
+    return Pftag(TagOptions(lookups=dict(lookups)))
 
-def test_noTags() -> dict:
-    """
-    Test the case when the input string has no tags. In
-    that case the output result is exactly the input.
 
-    Returns:
-        dict: _description_
-    """
-    print(f'Testing with string with no tags')
-    str_tag:str = r'http://192.168.1.200:22223/api/v1/object/collection/event'
-    tagger:pftag.Pftag      = pftag.Pftag({})
-    d_tag:dict              = tagger(str_tag)
-    assert d_tag['result']  == str_tag
+def test_coreTags_resolve() -> None:
+    tagger: Pftag = Pftag()
+    for name in CORE_TAGS:
+        assert tagger(f"%{name}").result == coreTag_value(name) or name == "timestamp"
+    assert re.match(r"\d{4}-\d{2}-\d{2}T", tagger("%timestamp").result)
 
-def test_timestamp_dt() -> None:
-    """
-    Get a %timestamp and assert return type is datetime.
-    """
-    print(f'Testing timestamp_dt return')
-    str_tag:str = r'%timestamp'
-    tagger:pftag.Pftag      = pftag.Pftag({})
-    d_tag:dict              = tagger(str_tag)
-    dt:datetime             = timestamp_dt(d_tag['result'])
-    assert type(dt)         == datetime
 
-def test_timestamp_diff() -> None:
-    """
-    Test a 1 second timestamp difference
-    """
-    print(f'Testing 1 second time delay/track')
-    tagger:pftag.Pftag      = pftag.Pftag({})
-    d_tag:dict              = tagger(r'%timestamp')
-    t1:str                  = d_tag['result']
-    time.sleep(1)
-    d_tag                   = tagger(r'%timestamp')
-    t2:str                  = d_tag['result']
-    dt_t1:datetime          = timestamp_dt(t1)
-    dt_t2:datetime          = timestamp_dt(t2)
-    dt:float                = (dt_t2 - dt_t1).total_seconds()
-    diff:int                = round(dt)
-    assert diff == 1
+def test_plainTag_runsIntoText() -> None:
+    tagger: Pftag = tagger_make(run={"subject": "sub-01"})
+    assert tagger("%subject-report.txt").result == "sub-01-report.txt"
+    assert tagger("a%subjectb").result == "asub-01b"
 
-def test_addDict_andHash():
-    print(f'Testing adding a new lookup dictionary and also hashing')
-    tagger:pftag.Pftag   = pftag.Pftag({})
 
-    # Add the "credentials" lookup
-    status:bool = tagger.lookupDict_add(
-    [
-        {"credentials":
-            {
-            "user":  "Jack Johnson",
-            "password": "123456"
-            }
+def test_longestNameWins() -> None:
+    tagger: Pftag = tagger_make(run={"in": "SHORT", "inputWorkingDir": "/in/a"})
+    assert tagger("%inputWorkingDir/x").result == "/in/a/x"
+    assert tagger("%in/x").result == "SHORT/x"
+
+
+def test_lookupOverridesCore() -> None:
+    assert tagger_make(mine={"os": "custom"})("%os").result == "custom"
+
+
+def test_unknownTag_leftVerbatim() -> None:
+    result = Pftag()("hello %nobody and %also_md5_ here")
+    assert result.status
+    assert result.result == "hello %nobody and %also_md5_ here"
+    assert result.unknownTags == ["nobody", "also"]
+    assert result.tagsFound == ["nobody", "also"]
+
+
+def test_unknownTag_strictFails() -> None:
+    result = Pftag(TagOptions(strict=True))("%nobody")
+    assert not result.status
+    assert result.errors == ["unknown tag %nobody"]
+
+
+def test_bareMarker_isLiteral() -> None:
+    assert Pftag()("100% done, 50%").result == "100% done, 50%"
+
+
+def test_escapedMarker_isLiteral() -> None:
+    tagger: Pftag = Pftag()
+    assert tagger(r"\%platform").result == "%platform"
+    assert tagger(r"a\_b").result == "a_b"
+
+
+def test_function_single() -> None:
+    assert Pftag()("%literal_upper_").result == "LITERAL"
+
+
+def test_function_withArgsAndTrailingText() -> None:
+    tagger: Pftag = tagger_make(run={"file": "brain.nii.gz"})
+    assert tagger("%file_rmext_.txt").result == "brain.nii.txt"
+    assert tagger("%file_rmext,rmext_").result == "brain"
+
+
+def test_function_chain() -> None:
+    expected: str = hashlib.md5(b"HELLO").hexdigest()[:6]
+    assert Pftag()("%literal_echo|hello,upper,md5|6_").result == expected
+
+
+def test_function_escapedArgument() -> None:
+    assert Pftag()(r"%literal_echo|a\,b\|c\_d_").result == "a,b|c_d"
+
+
+def test_function_unknownFailsAndLeavesTag() -> None:
+    result = Pftag()("x %literal_nosuch_ y")
+    assert not result.status
+    assert result.result == "x %literal_nosuch_ y"
+    assert "unknown function 'nosuch'" in result.errors[0]
+
+
+def test_function_badArgsFail() -> None:
+    result = Pftag()("%literal_md5|many_")
+    assert not result.status
+    assert "integer" in result.errors[0]
+
+
+def test_function_unterminatedChainIsPlainTag() -> None:
+    assert Pftag()("%literal_md5").result == "literal_md5"
+
+
+def test_functionsApplied_recorded() -> None:
+    result = Pftag()("%literal_echo|x,upper_ %platform_lower_")
+    assert result.functionsApplied == ["echo|x", "upper", "lower"]
+
+
+def test_markers_configurable() -> None:
+    options: TagOptions = TagOptions(tagMarker="@", funcMarker="[", funcArgMarker=",", funcSep="|")
+    tagger: Pftag = Pftag(options)
+    assert tagger("@literal[echo,hi|upper[ 100% _ok").result == "HI 100% _ok"
+
+
+def test_markers_mustBeSingleAndDistinct() -> None:
+    with pytest.raises(ValueError, match="one character"):
+        TagOptions(tagMarker="%%")
+    with pytest.raises(ValueError, match="differ"):
+        TagOptions(funcMarker="|")
+
+
+def test_lookup_rejectsNamesWithMarkers() -> None:
+    with pytest.raises(ValueError, match="marker"):
+        tagger_make(bad={"a_b": "x"})
+
+
+def test_lookupsFromJson_bothShapes() -> None:
+    tagger: Pftag = Pftag()
+    tagger.lookups_addFromJson('{"s": {"user": "chris"}}')
+    tagger.lookups_addFromJson('[{"t": {"pw": "secret"}}]')
+    assert tagger("%user:%pw_md5|4_").result == f"chris:{hashlib.md5(b'secret').hexdigest()[:4]}"
+    assert set(tagger.lookupNames) == {"core", "s", "t"}
+
+
+def test_lookupsFromJson_rejectsBadShapes() -> None:
+    tagger: Pftag = Pftag()
+    for bad in ("not json", "[1]", '{"s": "flat"}'):
+        with pytest.raises(ValueError):
+            tagger.lookups_addFromJson(bad)
+
+
+def test_pfdoRun_usage() -> None:
+    tagger: Pftag = tagger_make(
+        pfdo={
+            "inputWorkingDir": "/in/sub-01",
+            "outputWorkingDir": "/out/sub-01",
+            "inputWorkingFile": "T1.nii.gz",
         }
-    ]
     )
+    command = tagger(
+        "convert %inputWorkingDir/%inputWorkingFile %outputWorkingDir/%inputWorkingFile_rmext_.jpg"
+    )
+    assert command.result == "convert /in/sub-01/T1.nii.gz /out/sub-01/T1.nii.jpg"
 
-    str_tag:str     = r"'%user' has password '%password' with password hash %password_md5|5_."
-    str_result:str  = r"'Jack Johnson' has password '123456' with password hash e10ad."
-    d_tag:dict = tagger.run(str_tag)
-    assert d_tag['result'] == str_result
+
+def test_registry_custom() -> None:
+    registry: FunctionRegistry = FunctionRegistry()
+    registry.add("shout", lambda value, args: value.upper() + "!")
+    assert Pftag(registry=registry)("%literal_shout_").result == "LITERAL!"
+    assert "shout" in registry.names()
+    with pytest.raises(FunctionError):
+        registry.apply("nosuch", "x", [])
+
+
+@pytest.mark.parametrize(
+    ("template", "expected"),
+    [
+        ("%literal_strmsk|l****_", "literal"),
+        ("%literal_strmsk|L**X_", "LitXral"),
+        ("%literal_chrplc|l|L_", "LiteraL"),
+        ("%literal_chrplc|re:[aeiou]|*_", "l*t*r*l"),
+        ("%literal_strrepl|t|T_", "liTeral"),
+        ("%literal_echo|a.b.c,rmext_", "a.b"),
+        ("%literal_echo|noext,rmext_", "noext"),
+        ("%literal_echo|MiXed,lower_", "mixed"),
+    ],
+)
+def test_builtinFunctions(template: str, expected: str) -> None:
+    assert Pftag()(template).result == expected
+
+
+def test_dcmname_seededAndTailed() -> None:
+    tagger: Pftag = Pftag()
+    first: str = tagger("%literal_dcmname|foobar_").result
+    assert tagger("%literal_dcmname|foobar_").result == first
+    assert re.fullmatch(r"[A-Z' -]+\^[A-Z' -]+", first)
+    assert tagger("%literal_dcmname|foobar|^ANON_").result == first + "^ANON"
+    assert tagger("%literal_name|foobar_").result == first

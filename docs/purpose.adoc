@@ -1,0 +1,28 @@
+= pftag: purpose
+:toc:
+
+== Abstract
+
+pftag resolves templates: text in which `%tags` stand for values known only when the text is used, each tag optionally passed through a chain of functions. It exists so that the pf* family's tools can accept a template on the command line, a shell command for every directory, a log destination, an output file name, and resolve it the same way everywhere, with one grammar, one set of functions and one implementation.
+
+== The problem
+
+A tool that does the same thing in many places needs the user to say, once, what varies from place to place. `pfdo_run` runs a shell command in every directory of a tree; the command must name that directory's input and output paths and the file being handled, and the user must be able to derive output names from input names. `pflog` posts an event to a telemetry server at a URL that encodes the run, the machine and the time. A FreeSurfer plugin builds its command from the subject's directory. In each case the user writes the text before the values exist, and the program fills them in.
+
+The naive answer is Python's own formatting, `{inputWorkingFile}` and `str.format`. It fails in two ways on a command line. The braces are shell metacharacters in several shells and collide with brace expansion; and the user needs to transform values, not only insert them, and `format` cannot drop an extension or hash a name. The answer the family settled on in 2020, inside pfdo_run, was a `%` marker and a small vocabulary of functions written next to the tag. pftag is that answer lifted out into a package in 2023 so that pflog and others could share it, and rebuilt in 2026 so that it can be relied on.
+
+== What pftag is
+
+A template is text; a tag is `%` and a name; a chain of functions can follow the name between underscores, in the order a pipe would apply them: `%timestamp_chrplc|:|-,md5|6_`. Names resolve against core tags that describe the machine and the moment, `%platform`, `%timestamp` and the rest, and against dictionaries the calling program registers, which is how `pfdo_run` makes `%inputWorkingDir` mean the directory it is in. An unknown name is left as written, so a template that fails to resolve is still legible in the output. The four marker characters can be changed when a template lives inside text that already uses them.
+
+The functions are deliberately few: replace, mask, hash, strip an extension, change case, inject a literal, and generate a stable pseudonymous DICOM name. They are what the family's tools have needed to build names and to carry protected identifiers safely, hashed rather than written. The registry takes more from any caller.
+
+The result of processing is a record, not just a string: the text, every tag found, those left unresolved, every function applied, and any error, so that a tool can decide whether an unresolved tag is a mistake and can show a user what their template did.
+
+== What pftag is not
+
+pftag is not a template language. It has no conditionals, loops, or arithmetic, and will not grow them; a template that needs them is a program and should be written as one. It is not a shell: it substitutes text and does not quote it, so a value containing a space is the caller's problem to quote, which `pfdo_run` does by splitting with `shlex` after substitution. And it is not a configuration or secrets store; the lookups it is given live for one run.
+
+== Who uses it
+
+`pfdo_run` resolves its `--exec` string with pftag for every directory, which makes `pl-shexec` and `pl-freesurfer` pftag users by extension. `pflog` resolves telemetry URLs with it. Fifteen FNNDSC repositories list it, among them `pfbridge`, `pfchrs`, `pfmdb` and `pfms` on the service side and a dozen plugins on the ChRIS side.

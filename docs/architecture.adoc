@@ -1,0 +1,32 @@
+= pftag: architecture
+:toc:
+
+== Abstract
+
+pftag is three modules and a command: `models` holds the options, tokens and result as dataclasses; `functions` holds the function registry and the built-ins; `pftag` holds the engine, a single-pass scanner that recognises tags, parses their function chains and replaces them. The design turns on one decision: tags are recognised by a tokenizer that knows the names, not by searching the text for names, and everything else follows from it.
+
+== The scanner
+
+`Pftag.tag_process` walks the template once, left to right, building the output as it goes. Outside a tag, a backslash before a marker emits the marker and skips both; any other character is copied. At the tag marker, `token_read` tries to match a known name at that position, longest first, from the union of the core tags and every registered lookup. A match is a known token; its chain, if an opening function marker follows, is parsed by `chain_parse`. No match but an identifier is an unknown token, recorded and copied as written. No identifier at all means the marker was literal, as in `100%`.
+
+The longest-first match is what lets a tag run into other text, `%subject-report.txt`, without a delimiter, and what makes `%in` and `%inputWorkingDir` coexist. It is also the reason a tag name may not contain a marker character: a name such as `my_tag` would be ambiguous with `%my` followed by a chain, so `lookup_add` refuses it. The 1.x implementation searched each `%`-delimited chunk for any known name as a substring, which is why `%os` fired inside `%outputWorkingDir`, and the search had to be followed by a second search to decide which hit was meant.
+
+`chain_parse` reads a function name, then any number of arguments each introduced by the argument marker, then either a separator and the next function or the closing marker. `argument_read` stops at the next marker unless it is escaped. A chain that never closes is not a chain: `token_read` then returns the bare tag and the text that followed it stays text. This is the one place the grammar is lenient, and it is lenient on purpose, so that an underscore in surrounding prose does not swallow the rest of the template.
+
+== Values and functions
+
+`value_lookup` consults the registered lookups first and the core tags second, so a program can shadow `%os` if it must. Core values are computed when asked, which matters for `%timestamp`. `token_render` passes the value through the chain by calling `FunctionRegistry.apply` for each `FunctionCall`; a `FunctionError`, raised for an unknown function or unusable arguments, fails the tag: the tag is left as written, the error is recorded on the result, and the rest of the template still resolves. Failing the whole template for one bad function would throw away the information the user needs to fix it.
+
+`FunctionRegistry` maps names to functions of the signature `(value, args) -> str` and is preloaded with the built-ins. It is an object rather than a module-level table so that two engines in one process can have different functions, and so that a caller's additions do not leak into other callers. `dcmname` builds its own `Faker` instance and seeds that instance, where 1.x seeded the global generator and changed the behaviour of every other `Faker` user in the process.
+
+== The models
+
+`TagOptions` carries the four markers, the initial lookups, strictness and the command's flags, and validates the markers: single characters, distinct, not the escape. `TagToken` records where a tag was found and what chain it carried, so the engine can copy a failing tag back verbatim. `TagResult` is what a caller gets: the processed text and the account of every tag, which `--json` prints. The 1.x result was a dictionary with `status` and `result` keys; the dataclass names the rest of what happened.
+
+== The command
+
+`__main__` is a thin parser over the engine: `--tag`, `--lookupDictAdd` as JSON in either the object or the 1.x list form, `--strict`, `--json`, the four marker options, and the manual. The manual is plain text rather than the coloured page pftree renders, because pftag depends on nothing and the page renderer lives in pftree; the sections are the same.
+
+== Verification
+
+The tests cover the scanner on every edge the grammar has: tags running into text, longest-name precedence, lookup over core, unknown tags verbatim and under strict, literal and escaped markers, single and chained functions, escaped arguments, unterminated chains, failing functions, custom markers and their validation, both JSON lookup forms, each built-in function as a table, and the seeded pseudonym. The command is tested through `main`. Continuous integration runs ruff and the suite on CPython 3.11 through 3.14 and 3.14t and publishes on a `v*` tag.
