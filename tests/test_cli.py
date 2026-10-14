@@ -11,25 +11,28 @@ from pftag.__main__ import main
 
 
 def test_main_printsResult(capsys: pytest.CaptureFixture[str]) -> None:
-    assert main(["--tag", "x-%literal_upper_-y"]) == 0
-    assert capsys.readouterr().out == "x-LITERAL-y\n"
+    assert main(["--tag", 'x-%{"literal"|upper}-y 100%']) == 0
+    assert capsys.readouterr().out == "x-LITERAL-y 100%\n"
 
 
 def test_main_jsonResult(capsys: pytest.CaptureFixture[str]) -> None:
-    assert main(["--tag", "%literal %nope", "--json"]) == 0
+    assert main(["--tag", "%{date} %{nope} %timestamp", "--json"]) == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["result"] == "literal %nope"
     assert payload["unknownTags"] == ["nope"]
+    assert payload["legacyTags"] == ["%timestamp"]
+    assert payload["status"] is True
 
 
-def test_main_strictUnknownExitsOne(capsys: pytest.CaptureFixture[str]) -> None:
-    assert main(["--tag", "%nope", "--strict"]) == 1
-    assert "unknown tag %nope" in capsys.readouterr().err
+def test_main_strictExitsOne(capsys: pytest.CaptureFixture[str]) -> None:
+    assert main(["--tag", "%{nope}", "--strict"]) == 1
+    assert "unknown tag %{nope}" in capsys.readouterr().err
+    assert main(["--tag", "%timestamp", "--strict"]) == 1
+    assert "1.x tag" in capsys.readouterr().err
 
 
 def test_main_lookupDictAdd(capsys: pytest.CaptureFixture[str]) -> None:
-    assert main(["--lookupDictAdd", '{"s": {"user": "chris"}}', "--tag", "hi %user"]) == 0
-    assert capsys.readouterr().out == "hi chris\n"
+    assert main(["--lookupDictAdd", '{"s": {"user": "chris"}}', "--tag", "hi %{user} %{s.user|upper}"]) == 0
+    assert capsys.readouterr().out == "hi chris CHRIS\n"
 
 
 def test_main_badLookupIsUsageError() -> None:
@@ -44,23 +47,9 @@ def test_main_tagRequired() -> None:
     assert exc.value.code == 2
 
 
-def test_main_customMarkers(capsys: pytest.CaptureFixture[str]) -> None:
-    code: int = main(
-        [
-            "--tagMarker",
-            "@",
-            "--funcMarker",
-            "[",
-            "--funcArgMarker",
-            ",",
-            "--funcSep",
-            "|",
-            "--tag",
-            "@literal[upper[",
-        ]
-    )
-    assert code == 0
-    assert capsys.readouterr().out == "LITERAL\n"
+def test_main_functionFailureExitsOne(capsys: pytest.CaptureFixture[str]) -> None:
+    assert main(["--tag", "%{date|nosuch}"]) == 1
+    assert "unknown function" in capsys.readouterr().err
 
 
 def test_main_versionAndManual(capsys: pytest.CaptureFixture[str]) -> None:
@@ -82,5 +71,6 @@ def test_main_versionAndManual(capsys: pytest.CaptureFixture[str]) -> None:
     ):
         assert section in out
     assert __version__ in out
+    assert "%{inputWorkingFile|rmext}.jpg" in out
     assert main(["--synopsis"]) == 0
     assert "GRAMMAR" not in capsys.readouterr().out

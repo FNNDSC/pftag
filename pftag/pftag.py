@@ -1,26 +1,28 @@
-"""The pftag engine: find the tags in a template and replace each with its value.
+"""The pftag engine: find the ``%{...}`` tags in a template and replace each one.
 
-A template is ordinary text with tags in it. A tag is the tag marker, a name, and
-optionally a function chain between two function markers::
+A template is text. A tag is ``%{`` ... ``}``: a head, then zero or more functions
+separated by ``|``. The head is a name, qualified or not, or a quoted literal::
 
-    %name
-    %name_fn_
-    %name_fn|arg|arg,fn2|arg_
+    %{timestamp}
+    %{pfdo.inputWorkingFile}
+    %{inputWorkingFile|rmext}.jpg
+    %{timestamp|replace(:,-)|md5(6)}
+    %{"Subject12345"|sha256(8)}
 
-The engine scans the text once, left to right. At a marker it matches the longest
-known name (from the core tags and the registered lookups); a name it does not know
-is left in the text as written, unless ``strict`` is set. A known tag's value is passed
-through its functions in order and the result replaces the tag. Backslash before a
-marker makes it literal, inside or outside a tag.
+Nothing outside ``%{...}`` is a tag, so ``printf "%s"``, ``date +%Y%m%d`` and
+``%20`` in a URL pass through untouched. ``\\%{`` is a literal ``%{``. An unknown name
+is left as written and reported; a bare ``%name`` of a known name outside braces is
+reported as a 1.x-style tag; ``strict`` fails both. A failing function leaves its tag
+as written and fails the result.
 
 Key components:
-    - Pftag: the engine; ``lookup_add`` registers names, ``tag_process`` runs a template
-    - CORE_TAGS: the names every engine knows (``timestamp``, ``platform``, ...)
-    - coreTag_value: their values
+    - Pftag: the engine; ``lookup_add`` registers names, ``process`` runs a template,
+      ``argv_process`` runs a command line one argument at a time
+    - CORE_TAGS: ``timestamp``, ``date``, ``hostname``, ``platform``, ``user``, ``pid``
 
 Typical usage:
     tagger = Pftag(TagOptions(lookups={"run": {"subject": "sub-01"}}))
-    tagger("%subject_upper_-%timestamp_chrplc|:|-_.log").result
+    tagger("%{subject|upper}-%{timestamp|strftime(%Y%m%d)}.log").result
 
 Dependencies:
     - pftag.models, pftag.functions
@@ -28,21 +30,63 @@ Dependencies:
 
 from __future__ import annotations
 
+import getpass
 import json
 import logging
+import os
 import platform
 import re
+import socket
 from datetime import UTC, datetime
 
 from pftag.functions import FunctionError, FunctionRegistry
-from pftag.models import ESCAPE, FunctionCall, TagOptions, TagResult, TagToken
+from pftag.models import (
+    ESCAPE,
+    PIPE,
+    QUALIFIER,
+    TAG_CLOSE,
+    TAG_OPEN,
+    ArgvResult,
+    FunctionCall,
+    TagOptions,
+    TagResult,
+    TagToken,
+)
 
 logger: logging.Logger = logging.getLogger("pftag")
 
 CORE_LOOKUP: str = "core"
-CORE_TAGS: tuple[str, ...] = ("literal", "os", "platform", "release", "machine", "arch", "timestamp")
-IDENTIFIER: re.Pattern[str] = re.compile(r"[A-Za-z][A-Za-z0-9]*")
-FUNCTION_NAME: re.Pattern[str] = re.compile(r"[A-Za-z][A-Za-z0-9]*")
+CORE_TAGS: tuple[str, ...] = ("timestamp", "date", "hostname", "platform", "user", "pid")
+NAME: re.Pattern[str] = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)?")
+FUNCTION_NAME: re.Pattern[str] = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+LEGACY_TAG: re.Pattern[str] = re.compile(r"%([A-Za-z_][A-Za-z0-9_]*)")
+QUOTES: str = "\"'"
+BARE_ARG_STOPS: str = ",)" + PIPE + TAG_CLOSE
+
+
+def legacyName_find(identifier: str, known: set[str]) -> str | None:
+    """The known name a bare ``%identifier`` was probably meant as, if any.
+
+    A 1.x tag was ``%name`` or ``%name_fn|args_``, so the identifier after a bare
+    ``%`` is a known name, or a known name followed by ``_`` and a function chain.
+
+    Args:
+        identifier: the text after a bare ``%``.
+        known: every unqualified name that resolves.
+
+    Returns:
+        The name, or None when the identifier does not look like a 1.x tag.
+    """
+    if identifier in known:
+        return identifier
+    for name in sorted(known, key=len, reverse=True):
+        if identifier.startswith(name + "_"):
+            return name
+    return None
+
+
+class TagSyntaxError(ValueError):
+    """A ``%{...}`` tag could not be parsed."""
 
 
 def coreTag_value(name: str) -> str:
@@ -52,28 +96,29 @@ def coreTag_value(name: str) -> str:
         name: one of ``CORE_TAGS``.
 
     Returns:
-        ``literal`` for ``literal``; the OS name, platform system, release, machine
-        and architecture from ``platform``; the current local time in ISO 8601 with
-        offset for ``timestamp``.
+        The current local time in ISO 8601 with offset; today's date; the host name;
+        the platform system; the user's login name, or the numeric uid when the
+        process has no passwd entry; the process id.
 
     Raises:
         KeyError: for a name that is not a core tag.
     """
     match name:
-        case "literal":
-            return "literal"
-        case "os":
-            return __import__("os").name
-        case "platform":
-            return platform.system()
-        case "release":
-            return platform.release()
-        case "machine":
-            return platform.machine()
-        case "arch":
-            return "-".join(platform.architecture())
         case "timestamp":
             return datetime.now(UTC).astimezone().isoformat()
+        case "date":
+            return datetime.now(UTC).astimezone().date().isoformat()
+        case "hostname":
+            return socket.gethostname()
+        case "platform":
+            return platform.system()
+        case "user":
+            try:
+                return getpass.getuser()
+            except (KeyError, OSError):
+                return str(os.getuid())
+        case "pid":
+            return str(os.getpid())
         case _:
             raise KeyError(name)
 
@@ -82,55 +127,52 @@ class Pftag:
     """Find tags in templates and replace them with their values.
 
     Attributes:
-        options: the markers, lookups and strictness in force.
-        registry: the functions tags can be passed through.
-        lookups: name to value, flattened across every registered dictionary; a
-            later registration of the same name wins.
-        lookupNames: dictionary name to its tag names, as registered.
+        options: the lookups and strictness in force.
+        registry: the functions tags can be piped through.
+        lookups: dictionary name to its tag names and values, as registered.
+        names: tag name to the dictionary it belongs to, for unqualified lookup.
 
     Example:
-        >>> Pftag()("%literal_echo|hi,upper_")  # doctest: +SKIP
-        TagResult(status=True, result='HI', ...)
+        >>> Pftag()("%{\\"hi\\"|upper}").result
+        'HI'
     """
 
     def __init__(self, options: TagOptions | None = None, registry: FunctionRegistry | None = None) -> None:
         self.options: TagOptions = options if options is not None else TagOptions()
         self.registry: FunctionRegistry = registry if registry is not None else FunctionRegistry()
-        self.lookups: dict[str, str] = {}
-        self.lookupNames: dict[str, list[str]] = {CORE_LOOKUP: list(CORE_TAGS)}
+        self.lookups: dict[str, dict[str, str]] = {}
+        self.names: dict[str, str] = {}
         for name, values in self.options.lookups.items():
             self.lookup_add(name, values)
 
-    def lookup_add(self, name: str, values: dict[str, str]) -> None:
+    def lookup_add(self, name: str, values: dict[str, object]) -> None:
         """Register a named dictionary of tags.
 
         Args:
-            name: the dictionary's name, for reporting.
-            values: tag name to value. Values are stringified.
+            name: the dictionary's name, usable as a qualifier: ``%{name.tag}``.
+            values: tag name to value; values are stringified.
 
         Raises:
-            ValueError: if a tag name is empty, or contains a marker or the escape.
+            ValueError: if the dictionary name or a tag name is not an identifier, or a
+                tag name is already defined by another dictionary.
         """
-        reserved: str = (
-            self.options.tagMarker
-            + self.options.funcMarker
-            + self.options.funcArgMarker
-            + self.options.funcSep
-            + ESCAPE
-        )
+        if not FUNCTION_NAME.fullmatch(name) or name == CORE_LOOKUP:
+            raise ValueError(f"lookup name {name!r} must be an identifier other than {CORE_LOOKUP!r}")
         for tag in values:
-            if not tag or any(char in reserved for char in tag):
-                raise ValueError(f"tag name {tag!r} in lookup {name!r} is empty or contains a marker")
-        self.lookupNames[name] = list(values)
-        for tag, value in values.items():
-            self.lookups[tag] = str(value)
+            if not FUNCTION_NAME.fullmatch(str(tag)):
+                raise ValueError(f"tag name {tag!r} in lookup {name!r} must be an identifier")
+            owner: str | None = self.names.get(str(tag))
+            if owner is not None and owner != name:
+                raise ValueError(f"tag {tag!r} is already defined by lookup {owner!r}; qualify or rename it")
+        self.lookups[name] = {str(tag): str(value) for tag, value in values.items()}
+        for tag in self.lookups[name]:
+            self.names[tag] = name
 
     def lookups_addFromJson(self, text: str) -> None:
         """Register lookups given as JSON, as ``--lookupDictAdd`` passes them.
 
         Args:
-            text: ``{"name": {"tag": "value"}}``, or the 1.x list form
-                ``[{"name": {"tag": "value"}}, ...]``.
+            text: ``{"name": {"tag": "value"}}``, or a list of such objects.
 
         Raises:
             ValueError: if the JSON does not have one of those shapes.
@@ -139,187 +181,229 @@ class Pftag:
             parsed: object = json.loads(text)
         except json.JSONDecodeError as err:
             raise ValueError(f"lookups are not valid JSON: {err}") from err
-        groups: list[dict[str, dict[str, str]]]
-        if isinstance(parsed, dict):
-            groups = [parsed]
-        elif isinstance(parsed, list):
-            groups = parsed
-        else:
-            raise ValueError("lookups must be a JSON object or a list of objects")
+        groups: list[object] = parsed if isinstance(parsed, list) else [parsed]
         for group in groups:
             if not isinstance(group, dict):
-                raise ValueError("each lookup group must be a JSON object")
+                raise ValueError("lookups must be a JSON object or a list of objects")
             for name, values in group.items():
                 if not isinstance(values, dict):
                     raise ValueError(f"lookup {name!r} must map tag names to values")
-                self.lookup_add(str(name), {str(k): str(v) for k, v in values.items()})
+                self.lookup_add(str(name), values)
 
-    def tagNames(self) -> list[str]:
-        """Every known tag name, longest first, so matching prefers the longest."""
-        names: set[str] = set(self.lookups) | set(CORE_TAGS)
-        return sorted(names, key=lambda name: (-len(name), name))
-
-    def value_lookup(self, name: str) -> str | None:
-        """The value of a known tag, or None.
-
-        A registered lookup wins over a core tag of the same name.
-        """
-        if name in self.lookups:
-            return self.lookups[name]
-        if name in CORE_TAGS:
-            return coreTag_value(name)
-        return None
-
-    def name_match(self, template: str, start: int) -> str | None:
-        """The longest known tag name beginning at ``start``, or None."""
-        for name in self.tagNames():
-            if template.startswith(name, start):
-                return name
-        return None
-
-    def chain_parse(self, template: str, start: int) -> tuple[list[FunctionCall], int] | None:
-        """Parse a function chain that opened just before ``start``.
+    def value_lookup(self, head: str) -> str | None:
+        """The value of a tag head, or None when unknown.
 
         Args:
-            template: the text.
-            start: the index after the opening function marker.
+            head: ``name`` or ``lookup.name``; ``core.name`` reaches a core tag.
 
         Returns:
-            The calls and the index after the closing function marker, or None if
-            the chain is malformed or never closed.
+            The value, or None.
         """
-        argMarker: str = self.options.funcArgMarker
-        sep: str = self.options.funcSep
-        close: str = self.options.funcMarker
-        calls: list[FunctionCall] = []
-        index: int = start
-        while True:
-            nameMatch: re.Match[str] | None = FUNCTION_NAME.match(template, index)
-            if nameMatch is None:
-                return None
-            call: FunctionCall = FunctionCall(nameMatch.group())
-            index = nameMatch.end()
-            while index < len(template) and template[index] == argMarker:
-                arg, index = self.argument_read(template, index + 1)
-                call.args.append(arg)
-            calls.append(call)
-            if index >= len(template):
-                return None
-            if template[index] == sep:
-                index += 1
-                continue
-            if template[index] == close:
-                return calls, index + 1
-            return None
+        lookupName, _, tag = head.rpartition(QUALIFIER)
+        if lookupName:
+            if lookupName == CORE_LOOKUP:
+                return coreTag_value(tag) if tag in CORE_TAGS else None
+            return self.lookups.get(lookupName, {}).get(tag)
+        owner: str | None = self.names.get(head)
+        if owner is not None:
+            return self.lookups[owner][head]
+        if head in CORE_TAGS:
+            return coreTag_value(head)
+        return None
 
-    def argument_read(self, template: str, start: int) -> tuple[str, int]:
-        """Read one function argument.
+    def knownNames(self) -> set[str]:
+        """Every unqualified name that resolves."""
+        return set(self.names) | set(CORE_TAGS)
 
-        An argument runs to the next argument marker, function separator or closing
-        function marker; a backslash before any of those keeps it in the argument.
-
-        Args:
-            template: the text.
-            start: where the argument begins.
-
-        Returns:
-            The unescaped argument and the index of the character that ended it.
-        """
-        stops: str = self.options.funcArgMarker + self.options.funcSep + self.options.funcMarker
-        out: list[str] = []
-        index: int = start
-        while index < len(template):
-            char: str = template[index]
-            if char == ESCAPE and index + 1 < len(template) and template[index + 1] in stops + ESCAPE:
-                out.append(template[index + 1])
-                index += 2
-                continue
-            if char in stops:
-                break
-            out.append(char)
-            index += 1
-        return "".join(out), index
-
-    def tag_process(self, template: str) -> TagResult:
+    def process(self, template: str) -> TagResult:
         """Replace every tag in a template.
 
         Args:
             template: the text to process.
 
         Returns:
-            The processed text and an account of every tag met. ``status`` is False
-            when ``strict`` is set and a tag was unknown, or when a function failed;
-            a failed tag is left as written.
+            The processed text and an account of every tag met.
         """
         result: TagResult = TagResult(status=True, result="", template=template)
-        marker: str = self.options.tagMarker
-        markers: str = marker + self.options.funcMarker + self.options.funcArgMarker + self.options.funcSep
         out: list[str] = []
         index: int = 0
         while index < len(template):
+            if template.startswith(ESCAPE + TAG_OPEN, index):
+                out.append(TAG_OPEN)
+                index += len(ESCAPE + TAG_OPEN)
+                continue
+            if not template.startswith(TAG_OPEN, index):
+                out.append(template[index])
+                index += 1
+                continue
+            try:
+                token: TagToken = self.token_parse(template, index)
+            except TagSyntaxError as err:
+                result.status = False
+                result.errors.append(str(err))
+                out.append(template[index:])
+                break
+            out.append(self.token_render(token, template, result))
+            index = token.end
+        result.result = "".join(out)
+        self.legacy_check(template, result)
+        return result
+
+    def legacy_check(self, template: str, result: TagResult) -> None:
+        """Report bare ``%name`` occurrences of known names, which look like 1.x tags.
+
+        Args:
+            template: the text.
+            result: the result to record them on; ``strict`` fails it.
+        """
+        known: set[str] = self.knownNames()
+        for match in LEGACY_TAG.finditer(template):
+            if template.startswith(TAG_OPEN, match.start()):
+                continue
+            name: str | None = legacyName_find(match.group(1), known)
+            if name is not None:
+                result.legacyTags.append("%" + name)
+                message: str = f"%{name} looks like a 1.x tag; write %{{{name}}}"
+                if self.options.strict:
+                    result.status = False
+                    result.errors.append(message)
+                else:
+                    logger.warning("%s", message)
+
+    def token_parse(self, template: str, start: int) -> TagToken:
+        """Parse the tag opening at ``start``.
+
+        Args:
+            template: the text.
+            start: the index of ``%{``.
+
+        Returns:
+            The token, with its head, chain and span.
+
+        Raises:
+            TagSyntaxError: for an empty head, a bad function, or a missing ``}``.
+        """
+        index: int = start + len(TAG_OPEN)
+        index = self.whitespace_skip(template, index)
+        head: str
+        isLiteral: bool
+        if index < len(template) and template[index] in QUOTES:
+            head, index = self.quoted_read(template, index)
+            isLiteral = True
+        else:
+            nameMatch: re.Match[str] | None = NAME.match(template, index)
+            if nameMatch is None:
+                raise TagSyntaxError(f"tag at {start} has no name: {template[start : start + 20]!r}")
+            head, index = nameMatch.group(), nameMatch.end()
+            isLiteral = False
+        functions: list[FunctionCall] = []
+        index = self.whitespace_skip(template, index)
+        while index < len(template) and template[index] == PIPE:
+            call, index = self.call_parse(template, index + 1)
+            functions.append(call)
+            index = self.whitespace_skip(template, index)
+        if index >= len(template) or template[index] != TAG_CLOSE:
+            raise TagSyntaxError(f"tag at {start} is not closed: {template[start : start + 40]!r}")
+        known: bool = isLiteral or self.value_lookup(head) is not None
+        return TagToken(head, isLiteral, functions, start, index + 1, known)
+
+    def call_parse(self, template: str, start: int) -> tuple[FunctionCall, int]:
+        """Parse ``name`` or ``name(args)`` after a pipe.
+
+        Returns:
+            The call and the index after it.
+
+        Raises:
+            TagSyntaxError: for a missing name or an unclosed argument list.
+        """
+        index: int = self.whitespace_skip(template, start)
+        nameMatch: re.Match[str] | None = FUNCTION_NAME.match(template, index)
+        if nameMatch is None:
+            raise TagSyntaxError(f"expected a function name at {index}: {template[index : index + 20]!r}")
+        call: FunctionCall = FunctionCall(nameMatch.group())
+        index = self.whitespace_skip(template, nameMatch.end())
+        if index < len(template) and template[index] == "(":
+            index = self.whitespace_skip(template, index + 1)
+            if index < len(template) and template[index] == ")":
+                return call, index + 1
+            while True:
+                arg, index = self.argument_read(template, index)
+                call.args.append(arg)
+                index = self.whitespace_skip(template, index)
+                if index >= len(template):
+                    raise TagSyntaxError(f"arguments of {call.name} are not closed")
+                if template[index] == ",":
+                    index = self.whitespace_skip(template, index + 1)
+                    continue
+                if template[index] == ")":
+                    return call, index + 1
+                raise TagSyntaxError(f"unexpected {template[index]!r} in arguments of {call.name}")
+        return call, index
+
+    def argument_read(self, template: str, start: int) -> tuple[str, int]:
+        """Read one argument: quoted with escapes, or bare up to ``,`` or ``)``.
+
+        Returns:
+            The argument's text and the index after it. A bare argument is trimmed.
+        """
+        if start < len(template) and template[start] in QUOTES:
+            return self.quoted_read(template, start)
+        index: int = start
+        while index < len(template) and template[index] not in BARE_ARG_STOPS:
+            index += 1
+        return template[start:index].strip(), index
+
+    @staticmethod
+    def quoted_read(template: str, start: int) -> tuple[str, int]:
+        """Read a quoted string opening at ``start``; ``\\"``, ``\\'`` and ``\\\\`` escape.
+
+        Returns:
+            The unquoted text and the index after the closing quote.
+
+        Raises:
+            TagSyntaxError: if the quote never closes.
+        """
+        quote: str = template[start]
+        out: list[str] = []
+        index: int = start + 1
+        while index < len(template):
             char: str = template[index]
-            if char == ESCAPE and index + 1 < len(template) and template[index + 1] in markers + ESCAPE:
+            if char == ESCAPE and index + 1 < len(template) and template[index + 1] in QUOTES + ESCAPE:
                 out.append(template[index + 1])
                 index += 2
                 continue
-            if char != marker:
-                out.append(char)
-                index += 1
-                continue
-            token: TagToken | None = self.token_read(template, index)
-            if token is None:
-                out.append(char)
-                index += 1
-                continue
-            result.tagsFound.append(token.name)
-            if not token.known:
-                result.unknownTags.append(token.name)
-                if self.options.strict:
-                    result.status = False
-                    result.errors.append(f"unknown tag {marker}{token.name}")
-                out.append(token.text(template))
-            else:
-                out.append(self.token_render(token, template, result))
-            index = token.end
-        result.result = "".join(out)
-        return result
+            if char == quote:
+                return "".join(out), index + 1
+            out.append(char)
+            index += 1
+        raise TagSyntaxError(f"quote opened at {start} is not closed: {template[start : start + 20]!r}")
 
-    def token_read(self, template: str, start: int) -> TagToken | None:
-        """Read the tag that opens at ``start``.
-
-        Returns:
-            A known token with its function chain; an unknown token spanning the
-            identifier after the marker; or None when no identifier follows the
-            marker, which makes the marker literal.
-        """
-        nameStart: int = start + 1
-        name: str | None = self.name_match(template, nameStart)
-        if name is None:
-            identifier: re.Match[str] | None = IDENTIFIER.match(template, nameStart)
-            if identifier is None:
-                return None
-            return TagToken(identifier.group(), [], start, identifier.end(), known=False)
-        end: int = nameStart + len(name)
-        functions: list[FunctionCall] = []
-        if end < len(template) and template[end] == self.options.funcMarker:
-            parsed: tuple[list[FunctionCall], int] | None = self.chain_parse(template, end + 1)
-            if parsed is not None:
-                functions, end = parsed
-        return TagToken(name, functions, start, end, known=True)
+    @staticmethod
+    def whitespace_skip(template: str, index: int) -> int:
+        """The index of the next non-space character at or after ``index``."""
+        while index < len(template) and template[index] in " \t":
+            index += 1
+        return index
 
     def token_render(self, token: TagToken, template: str, result: TagResult) -> str:
-        """The text a known token becomes.
+        """The text a token becomes, recording what happened on the result.
 
         Args:
-            token: the token.
-            template: the text, for the fallback when a function fails.
-            result: the running result, which records applied functions and errors.
+            token: the parsed tag.
+            template: the text, for the verbatim fallback.
+            result: the running result.
 
         Returns:
-            The value after its functions, or the tag as written if a function failed.
+            The head's value after its functions; the tag as written when the head is
+            unknown or a function fails.
         """
-        value: str | None = self.value_lookup(token.name)
+        result.tagsFound.append(token.head)
+        value: str | None = token.head if token.isLiteral else self.value_lookup(token.head)
         if value is None:
+            result.unknownTags.append(token.head)
+            if self.options.strict:
+                result.status = False
+                result.errors.append(f"unknown tag {token.text(template)}")
             return token.text(template)
         for call in token.functions:
             try:
@@ -327,11 +411,31 @@ class Pftag:
             except FunctionError as err:
                 result.status = False
                 result.errors.append(f"{token.text(template)}: {err}")
-                logger.error("%s", err)
                 return token.text(template)
-            result.functionsApplied.append("|".join([call.name, *call.args]))
+            result.functionsApplied.append(f"{call.name}({','.join(call.args)})")
         return value
 
+    def argv_process(self, argv: list[str]) -> ArgvResult:
+        """Process a command line one argument at a time.
+
+        Each argument is a template of its own, so a value with a space or a quote stays
+        inside its argument and cannot change the shape of the command. The caller
+        splits the user's command (``shlex.split``) before calling this.
+
+        Args:
+            argv: the command and its arguments.
+
+        Returns:
+            The processed arguments and each one's result. A command whose ``status`` is
+            False must not be run.
+        """
+        results: list[TagResult] = [self.process(argument) for argument in argv]
+        return ArgvResult(
+            status=all(result.status for result in results),
+            argv=[result.result for result in results],
+            results=results,
+        )
+
     def __call__(self, template: str) -> TagResult:
-        """``tag_process`` as a call."""
-        return self.tag_process(template)
+        """``process`` as a call."""
+        return self.process(template)

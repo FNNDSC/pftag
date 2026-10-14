@@ -1,19 +1,19 @@
 """The data models of pftag.
 
-A template is text with tags in it; a tag is a marker, a name, and optionally a
-chain of functions. These models describe the options that fix the grammar's
-markers and supply the lookups, the tokens the tokenizer finds, and the result of
-processing a template.
+A template is text with ``%{...}`` tags in it. These models describe the options a
+processor is built with, the parts a tag parses into, and what processing a template
+or a command line produced.
 
 Key components:
-    - TagOptions: markers, lookups, strictness
+    - TagOptions: lookups and strictness
     - FunctionCall: one function name with its arguments
-    - TagToken: one tag as found in the text, with its span and functions
-    - TagResult: the processed text and what happened to each tag
+    - TagToken: one parsed tag with its span, head and chain
+    - TagResult: a processed template and an account of every tag
+    - ArgvResult: a processed command line
 
 Typical usage:
     options = TagOptions(lookups={"pfdo": {"inputWorkingDir": "/in/a"}})
-    result = Pftag(options)("%inputWorkingDir/%inputWorkingFile_rmext_.nii")
+    result = Pftag(options)("%{inputWorkingDir}/%{inputWorkingFile|rmext}.nii")
 
 Dependencies:
     - standard library only
@@ -23,11 +23,11 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 
-DEFAULT_TAG_MARKER: str = "%"
-DEFAULT_FUNC_MARKER: str = "_"
-DEFAULT_FUNC_ARG_MARKER: str = "|"
-DEFAULT_FUNC_SEP: str = ","
+TAG_OPEN: str = "%{"
+TAG_CLOSE: str = "}"
+PIPE: str = "|"
 ESCAPE: str = "\\"
+QUALIFIER: str = "."
 
 
 @dataclass
@@ -35,53 +35,24 @@ class TagOptions:
     """Everything the tag processor needs.
 
     Attributes:
-        tagMarker: the character that opens a tag (default ``%``).
-        funcMarker: the character that opens and closes a function chain (default
-            ``_``), so ``%tag_fn_``.
-        funcArgMarker: separates a function from its arguments and the arguments
-            from each other (default ``|``), so ``%tag_fn|a|b_``.
-        funcSep: separates chained functions (default ``,``), so ``%tag_fn,gn_``.
-        lookups: named dictionaries of tag name to value. Names are matched longest
-            first across every dictionary and the core tags.
-        strict: an unknown tag fails the result instead of being left verbatim.
+        lookups: named dictionaries of tag name to value. A name may appear in one
+            dictionary only, unless it is always written qualified, ``%{dict.name}``.
+        strict: an unknown tag, or a 1.x-style bare ``%name`` of a known name, fails
+            the result instead of being left verbatim and warned about.
         tag: the template, when given on the command line.
         json: the command prints the whole result as JSON.
-        verbosity: ``0`` silences the console.
+        verbosity: ``0`` prints only the result.
 
     Example:
         >>> TagOptions(lookups={"a": {"x": "1"}}).lookups["a"]["x"]
         '1'
     """
 
-    tagMarker: str = DEFAULT_TAG_MARKER
-    funcMarker: str = DEFAULT_FUNC_MARKER
-    funcArgMarker: str = DEFAULT_FUNC_ARG_MARKER
-    funcSep: str = DEFAULT_FUNC_SEP
     lookups: dict[str, dict[str, str]] = field(default_factory=dict)
     strict: bool = False
     tag: str = ""
     json: bool = False
     verbosity: int = 0
-
-    def __post_init__(self) -> None:
-        """Check the markers are single, distinct characters.
-
-        Raises:
-            ValueError: if a marker is not one character, or two markers coincide.
-        """
-        markers: dict[str, str] = {
-            "tagMarker": self.tagMarker,
-            "funcMarker": self.funcMarker,
-            "funcArgMarker": self.funcArgMarker,
-            "funcSep": self.funcSep,
-        }
-        for name, marker in markers.items():
-            if len(marker) != 1:
-                raise ValueError(f"{name} must be one character, not {marker!r}")
-            if marker == ESCAPE:
-                raise ValueError(f"{name} cannot be the escape character {ESCAPE!r}")
-        if len(set(markers.values())) != len(markers):
-            raise ValueError(f"markers must differ from each other: {markers}")
 
 
 @dataclass
@@ -90,7 +61,7 @@ class FunctionCall:
 
     Attributes:
         name: the function's name, as registered.
-        args: its arguments, in order, already unescaped.
+        args: its arguments, in order, unquoted and unescaped.
 
     Example:
         >>> FunctionCall("md5", ["4"]).args
@@ -103,21 +74,23 @@ class FunctionCall:
 
 @dataclass
 class TagToken:
-    """One tag found in a template.
+    """One ``%{...}`` tag found in a template.
 
     Attributes:
-        name: the tag's name.
-        functions: the chain to apply to its value, in order.
-        start: index of the marker in the template.
-        end: index just past the tag, and past its closing marker when it has one.
-        known: the name resolved to a lookup or a core tag.
+        head: the tag name, qualified or not, or the literal text when ``isLiteral``.
+        isLiteral: the head was a quoted string rather than a name.
+        functions: the chain to apply to the head's value, in order.
+        start: index of ``%{`` in the template.
+        end: index just past the closing ``}``.
+        known: the head is a literal or resolved to a value.
 
     Example:
-        >>> TagToken("os", [], 0, 3, True).end
-        3
+        >>> TagToken("timestamp", False, [], 0, 12, True).end
+        12
     """
 
-    name: str
+    head: str
+    isLiteral: bool
     functions: list[FunctionCall]
     start: int
     end: int
@@ -133,14 +106,16 @@ class TagResult:
     """The outcome of processing a template.
 
     Attributes:
-        status: True unless ``strict`` was set and a tag was unknown, or a function
-            failed.
-        result: the processed text.
+        status: False when ``strict`` met an unknown or 1.x-style tag, a tag did not
+            parse, or a function failed.
+        result: the processed text; a failing tag is left as written.
         template: the text as given.
-        tagsFound: every tag name met, known or not, in order.
-        unknownTags: the names that resolved to nothing and were left verbatim.
-        functionsApplied: ``name|arg|arg`` for every function run, in order.
-        errors: messages from functions that failed.
+        tagsFound: every tag head met, in order.
+        unknownTags: heads that resolved to nothing and were left verbatim.
+        legacyTags: bare ``%name`` occurrences of known names outside braces, which
+            look like 1.x templates and are not substituted.
+        functionsApplied: ``name(arg,arg)`` for every function run, in order.
+        errors: what went wrong, one message per failure.
 
     Example:
         >>> TagResult(True, "x", "x").tagsFound
@@ -152,8 +127,37 @@ class TagResult:
     template: str
     tagsFound: list[str] = field(default_factory=list)
     unknownTags: list[str] = field(default_factory=list)
+    legacyTags: list[str] = field(default_factory=list)
     functionsApplied: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
+
+    def toDict(self) -> dict[str, object]:
+        """A JSON-ready view of the result."""
+        return asdict(self)
+
+
+@dataclass
+class ArgvResult:
+    """The outcome of processing a command line, one argument at a time.
+
+    Attributes:
+        status: every argument processed cleanly; a command whose status is False
+            must not be run.
+        argv: the processed arguments, one per input argument.
+        results: the TagResult of each argument, in order.
+
+    Example:
+        >>> ArgvResult(True, ["ls"], []).argv
+        ['ls']
+    """
+
+    status: bool
+    argv: list[str]
+    results: list[TagResult] = field(default_factory=list)
+
+    def errors(self) -> list[str]:
+        """Every error across the arguments, in order."""
+        return [error for result in self.results for error in result.errors]
 
     def toDict(self) -> dict[str, object]:
         """A JSON-ready view of the result."""

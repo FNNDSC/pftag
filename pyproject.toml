@@ -5,12 +5,12 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "pftag"
 dynamic = ["version"]
-description = "A string template processor: %tags looked up at run time, optionally passed through chained functions"
+description = "A string template processor: %{tags} resolved at run time, optionally piped through functions"
 readme = "README.md"
 license = { text = "MIT" }
 authors = [{ name = "FNNDSC", email = "dev@babyMRI.org" }]
 requires-python = ">=3.11"
-dependencies = ["faker>=20"]
+dependencies = []
 classifiers = [
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.11",
@@ -28,7 +28,8 @@ Homepage = "https://github.com/FNNDSC/pftag"
 pftag = "pftag.__main__:main"
 
 [project.optional-dependencies]
-dev = ["pytest>=8", "ruff>=0.6"]
+names = ["faker>=20"]
+dev = ["pytest>=8", "ruff>=0.6", "faker>=20"]
 
 [tool.setuptools]
 packages = ["pftag"]

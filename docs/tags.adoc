@@ -1,29 +1,33 @@
-= pftag: tags, functions and templates
+= pftag: the template reference
 :toc:
 
 == Abstract
 
-This document is the reference for writing pftag templates: the grammar of a tag, how names are resolved, how functions are chained and given arguments, how markers are escaped or changed, and what every built-in tag and function does. It is written for the person typing a template on a command line, such as `pfdo_run --exec` or a `pflog` URL, and for the developer registering tags for them.
+This is the reference for writing pftag templates: text whose `%{...}` tags are resolved when the text is used. It covers the grammar of a tag, how names resolve, how functions chain and take arguments, how literal text starts a chain, what the core tags and built-in functions do, how a program registers its own tags, and how commands are processed safely. It is written for the person typing a template on a command line, such as a `pfdo_run --exec` string, an output file name or a `pflog` URL, and for the developer registering tags for them.
 
 == A template
 
-A template is ordinary text. Anything that is not a tag passes through unchanged. A tag begins with the tag marker, `%` by default, followed immediately by a name:
+A template is ordinary text. A tag is `%{` ... `}`. Everything else passes through unchanged:
 
 ----
-run-%timestamp-on-%platform.log
+run-%{timestamp}-on-%{hostname}.log
 ----
 
-Processing replaces each tag with its value and leaves the rest alone:
+becomes, when processed,
 
 ----
-run-2026-10-13T21:40:12.118-04:00-on-Linux.log
+run-2026-10-13T21:40:12.118-04:00-on-pangea.log
 ----
 
-A `%` that is not followed by a letter is not a tag and stays as it is, so `100% done` is unchanged. A `%` followed by a letter that does not begin a known name is an unknown tag: it is left exactly as written, reported in the result's `unknownTags`, and, under `--strict`, fails the run. Unknown tags are kept rather than erased because a template that reaches a tool through several layers of quoting is easier to debug when the tag that did not resolve is still visible in the output.
+Nothing outside `%{...}` is a tag. `printf "%s"`, `date +%Y%m%d`, `100% done` and `%20` in a URL are all literal text, because none of them contains `%{`. This is the deliberate difference from 1.x, where a bare `%name` was a tag and every `%` in a `printf` format or a URL was a near miss. Inside the braces `%` is an ordinary character, so `%{timestamp|strftime(%Y%m%d)}` works. The one escape is `\%{`, which produces a literal `%{`; a backslash anywhere else is a backslash.
 
 == Names
 
-A name is letters and digits, starting with a letter. Names come from two places: the core tags every engine knows, and the lookup dictionaries a caller registers. When a tag could be read as more than one name, the longest known name wins, so a tag may run straight into other text without a separator: with `subject` registered, `%subject-report.txt` becomes `sub-01-report.txt`, and with both `in` and `inputWorkingDir` registered, `%inputWorkingDir/x` resolves the long name. A registered name shadows a core tag of the same name.
+The head of a tag is a name: letters, digits and underscores, not starting with a digit. The braces delimit it, so a tag may run straight into other text, `%{subject}_01` or `%{subject}report.txt`, and names may themselves contain underscores, `%{input_working_dir}`.
+
+A name resolves against the core tags, listed below, and against the lookup dictionaries a program has registered. A registered name shadows a core tag of the same name; the core tag is still reachable as `%{core.name}`. Each dictionary has a name of its own, and a tag may be written qualified by it, `%{secrets.user}`, which is required when two dictionaries define the same tag and is otherwise optional.
+
+A name that resolves to nothing is an unknown tag. It is left in the text exactly as written, `%{nope}`, and reported in the result's `unknownTags`. Under `--strict` it fails the result instead. Unknown tags are kept rather than erased so that a template reaching a tool through several layers of quoting is debuggable: the tag that did not resolve is still visible in the output.
 
 The core tags:
 
@@ -31,46 +35,38 @@ The core tags:
 |===
 | tag | value
 
-| `%literal` | the word `literal`; its use is as a carrier for `echo`, below
-| `%os` | `os.name`, such as `posix`
-| `%platform` | `platform.system()`, such as `Linux`
-| `%release` | `platform.release()`, the kernel version
-| `%machine` | `platform.machine()`, such as `x86_64`
-| `%arch` | `platform.architecture()` joined with `-`, such as `64bit-ELF`
-| `%timestamp` | the current local time in ISO 8601 with its UTC offset, computed when the template is processed
+| `%{timestamp}` | the current local time in ISO 8601 with its UTC offset, computed when the template is processed
+| `%{date}` | today's date, `YYYY-MM-DD`
+| `%{hostname}` | the host name; inside a container, the container's id
+| `%{platform}` | `platform.system()`, such as `Linux`
+| `%{user}` | the login name, or the numeric uid when the process has no passwd entry, as in many containers
+| `%{pid}` | the process id
 |===
-
-Lookup dictionaries are registered by the program using pftag, or on the command line as JSON:
-
-----
-pftag --lookupDictAdd '{"run": {"subject": "sub-01", "session": "ses-2"}}' --tag "%subject/%session"
-----
-
-A dictionary has a name, used only for reporting, and maps tag names to values. The 1.x form, a JSON list of such objects, is still accepted. A tag name may not contain any of the four marker characters or a backslash, since the parser could not then tell where the name ends.
 
 == Functions
 
-A tag's value can be passed through functions written after the name between two function markers, `_` by default:
+A tag's value can be piped through functions written after the head, each introduced by `|`:
 
 ----
-%timestamp_md5_
+%{timestamp|md5}
+%{inputWorkingFile|rmext}.jpg
+%{timestamp|replace(:,-)|md5(6)}
 ----
 
-The order is the tag first, then what to do to it: Reverse Polish, the order of a UNIX pipe. Several functions chain with the function separator, `,`, each receiving the previous one's result:
+The order is the tag first, then what to do to it, left to right, each function receiving the previous one's result: the order of a UNIX pipe. The last example reads: take the timestamp, replace each `:` with `-`, hash the result to six characters. Text after the closing `}` is kept, so an extension can follow a function.
+
+Arguments are written in parentheses after the function's name, separated by commas. An argument is either bare or quoted:
 
 ----
-%timestamp_chrplc|:|-,md5|6_
+replace(:, -)              bare: trimmed of surrounding whitespace; may not contain , ) | or }
+replace(":", "-")          double-quoted
+replace(':', '-')          single-quoted, convenient inside a double-quoted shell string
+replace(",", "\"")         inside quotes, \" \' and \\ escape
 ----
 
-reads: take the timestamp, replace each `:` with `-`, hash to six characters. Arguments follow a function's name after the argument marker, `|`, and are separated by it. A function that needs an argument it was not given fails the tag: the tag is left as written, the result's `status` is False and `errors` says which function and why, and the command exits 1. An unknown function fails the same way.
+A function that takes no arguments may be written with or without empty parentheses: `%{file|rmext}` and `%{file|rmext()}` are the same.
 
-Text after the closing marker is kept, so an extension can follow a function:
-
-----
-%inputWorkingFile_rmext_.jpg
-----
-
-The closing marker is required for a chain to be a chain. `%literal_md5` with no closing marker is the tag `%literal` followed by the text `_md5`, since without the marker there is no way to tell a function from an underscore in the surrounding text.
+A function that is given the wrong number of arguments, an argument it cannot use, or a name that is not registered fails the tag: the tag is left in the text as written, the result's `status` is False, `errors` names the function and the problem, and the command exits 1. The rest of the template still resolves, so that one mistake does not hide the others.
 
 The built-in functions:
 
@@ -78,53 +74,50 @@ The built-in functions:
 |===
 | function | effect
 
-| `echo\|<text>` | replace the value with `<text>`. With `%literal` this injects text into a template so that later functions can work on it.
-| `md5[\|<chars>]` | the MD5 hex digest of the value, cut to its first `<chars>` characters when given.
-| `chrplc\|<target>\|<new>` | replace every `<target>` with `<new>`. `<target>` is taken literally; written as `re:<pattern>` it is a regular expression.
-| `strrepl\|<target>\|<new>` | the same, under the name pfdo_run used.
-| `strmsk\|<mask>` | for each position of the mask, `*` keeps the value's character and any other character replaces it; positions beyond the mask are kept. `%platform_strmsk\|l****_` turns `Linux` into `linux`.
-| `rmext` | drop the value's last extension: `brain.nii.gz` becomes `brain.nii`; apply twice for `brain`.
-| `upper`, `lower` | change case.
-| `dcmname[\|<seed>[\|<tail>]]` | a DICOM-style `LAST^FIRST` name. The same `<seed>` always produces the same name, so a subject can be given a stable pseudonym; `<tail>` is appended, as in `%NAME_dcmname\|foobar\|^ANON_`.
-| `name` | the same as `dcmname`.
+| `rmext` | drop the last extension: `brain.nii.gz` becomes `brain.nii`; apply twice for `brain`
+| `ext` | the last extension without its dot: `brain.nii.gz` gives `gz`
+| `basename` | the last path component: `/a/b/c.txt` gives `c.txt`
+| `dirname` | the path without its last component: `/a/b/c.txt` gives `/a/b`
+| `replace(a, b)` | replace every `a` with `b`, taken literally
+| `re(pattern, repl)` | replace every match of the regular expression `pattern` with `repl`; `repl` may use `\1` groups
+| `upper`, `lower` | change case
+| `strip` / `strip(chars)` | drop leading and trailing whitespace, or the given characters
+| `pad(width)` / `pad(width, char)` | left-pad to `width` with `char`, default `0`: `7` becomes `0007`
+| `slice(stop)` / `slice(start, stop)` | characters by index, Python style, so `slice(3)` is the first three
+| `md5` / `md5(n)`, `sha256` / `sha256(n)` | the hex digest, cut to its first `n` characters when given
+| `strftime(format)` | format an ISO 8601 timestamp with a `strftime` pattern: `%{timestamp\|strftime(%Y%m%d-%H%M)}`
+| `mask(pattern)` | for each position of the pattern, `*` keeps the value's character and any other character replaces it; positions past the pattern are kept, so the result is never shorter than the value. `%{platform\|mask(l****)}` turns `Linux` into `linux`
+| `dcmname` / `dcmname(seed)` | a DICOM-style `LAST^FIRST` name, see below
 |===
 
-The recurring idiom for protected text is `echo` followed by `md5`:
+=== Pseudonyms
+
+`dcmname` replaces a value with a `LAST^FIRST` name generated from a seed: the argument when given, the value itself otherwise. The same seed always gives the same name, so a subject can carry one pseudonym across a study, and a tail can follow the tag: `%{PatientName|dcmname(study-1)}^ANON`.
+
+Be clear about what that is: a seeded hash wearing a surname. Anyone who holds the seed scheme can recompute the name from the identifier, and a name is no harder to join across datasets than the hash would be. It is a readable stand-in, not anonymization, and the mapping it implies must be governed like any other re-identification key. The function needs the `faker` package: `pip install 'pftag[names]'`; without it, using `dcmname` fails with a message saying so.
+
+== Literal heads
+
+A quoted string can stand in the head's place, so a chain can start from text that is not a tag:
 
 ----
-%literal_echo|Subject12345,md5|5_
+%{"Subject12345"|sha256(8)}
+%{'ses-01'|upper}
 ----
 
-The literal subject identifier never appears in the output, only its hash, and anyone who knows the identifier can recompute the hash to find its records.
+This is the way to carry protected text through a template safely: the identifier never appears in the output, only its hash, and anyone who knows the identifier can recompute the hash to find its records. The 1.x idiom for this, `%literal_echo|Subject12345,md5|5_`, needed two pseudo-functions; a literal head needs none.
 
-== Escaping
+== Commands
 
-A backslash before any of the four marker characters, or before a backslash, keeps it literal, inside or outside a tag. `\%platform` is the text `%platform`; inside an argument, `%literal_echo|a\,b_` yields `a,b` and `%literal_echo|a\|b_` yields `a|b`. Elsewhere a backslash is an ordinary character.
+Substituting into a command line as text is unsafe: a value with a space or a quote changes how the shell, or the splitter, reads the command. pftag therefore offers two entry points:
 
-== Changing the markers
+`process(template)`::
+  Text in, text out. For file names, URLs and messages.
 
-The four characters are options, on the command line and in `TagOptions`:
+`argv_process(argv)`::
+  For commands. The caller splits the user's command first, with `shlex.split`, and pftag then processes each argument as a template of its own. A value with a space stays inside its argument; a value with a quote is just characters. `pfdo_run` uses this for its `--exec` string. The result carries a `status`; a command whose status is False must not be run, because one of its arguments still contains an unresolved or failed tag.
 
-[cols="1,1,3"]
-|===
-| option | default | role
-
-| `--tagMarker` | `%` | opens a tag
-| `--funcMarker` | `_` | opens and closes the function chain
-| `--funcArgMarker` | `\|` | separates a function from its arguments and the arguments from each other
-| `--funcSep` | `,` | separates chained functions
-|===
-
-Each must be a single character, they must all differ, and none may be the backslash. Changing them is useful when a template lives inside something that already uses `%` or `_`, such as a `printf` format or a shell `--exec` string with many underscores in file names:
-
-----
---tagMarker "@" --funcMarker "[" --funcArgMarker "," --funcSep "|"
-@tag[func,a1,a2|func2,b1[
-----
-
-== Reading a result
-
-The command prints the processed text. With `--json` it prints the whole result: `result`, `template`, `tagsFound` in order, `unknownTags`, `functionsApplied` as `name|arg|arg` entries in order, `errors`, and `status`. The library returns the same as a `TagResult` dataclass. `status` is True unless `strict` met an unknown tag or a function failed; the processed text is always returned, with any failing tag left as written.
+Values are substituted once. A value that itself contains `%{...}` is not processed again, so a value cannot inject tags.
 
 == Registering tags from a program
 
@@ -136,11 +129,53 @@ tagger = Pftag(TagOptions(lookups={"pfdo": {
     "outputWorkingDir": "/out/sub-01",
     "inputWorkingFile": "T1.nii.gz",
 }}))
-tagger("convert %inputWorkingDir/%inputWorkingFile %outputWorkingDir/%inputWorkingFile_rmext_.jpg").result
+tagger("%{inputWorkingDir}/%{inputWorkingFile}").result
+tagger.argv_process(shlex.split("convert %{inputWorkingDir}/%{inputWorkingFile} %{outputWorkingDir}/%{inputWorkingFile|rmext}.jpg")).argv
 ----
 
-`lookup_add(name, values)` registers a dictionary after construction and replaces one of the same name; values are stringified. Functions are added through a `FunctionRegistry` passed to `Pftag`: `registry.add("shout", lambda value, args: value.upper() + "!")`. A function receives the value so far and the list of arguments written in the template, and returns text; it raises `FunctionError` for arguments it cannot use.
+`lookup_add(name, values)` registers a dictionary after construction; registering a dictionary again replaces it. A dictionary's name and its tag names are identifiers; a tag name already defined by a different dictionary is an error at registration, since a silent shadow would be a bug in the program, not a choice by the user. Values are stringified. `lookups_addFromJson(text)` takes the command line's JSON, `{"name": {"tag": "value"}}` or a list of such objects.
 
-== Differences from 1.x
+Functions are added through a `FunctionRegistry` passed to `Pftag`:
 
-Names are now matched longest first against the known names, not by substring, so `%os` no longer matches inside `%outputWorkingDir` and a tag may run straight into text. Function chains are parsed to their closing marker, and arguments may contain escaped markers. `strmsk` no longer shortens the value. `chrplc` is literal unless written `re:`. `rmext` and `strrepl` come from pfdo_run; `upper` and `lower` are new. `dcmname` seeds its own generator and builds the name from a first and a last name, so a prefixed name can no longer break it. The result is a dataclass rather than a dictionary.
+----
+registry = FunctionRegistry()
+registry.add("shout", lambda value, args: value.upper() + "!")
+Pftag(registry=registry)("%{'hi'|shout}").result   # 'HI!'
+----
+
+A function receives the value so far and the list of arguments as written, and returns text; it raises `FunctionError` for arguments it cannot use, which pftag reports as a failed tag.
+
+== Reading a result
+
+The command prints the processed text and, with `--json`, the whole result. The library returns a `TagResult`:
+
+[cols="1,3"]
+|===
+| field | meaning
+
+| `status` | False when `strict` met an unknown or 1.x-style tag, a tag did not parse, or a function failed
+| `result` | the processed text; a failing tag is left as written
+| `template` | the text as given
+| `tagsFound` | every tag head met, in order
+| `unknownTags` | heads that resolved to nothing
+| `legacyTags` | bare `%name` occurrences of known names outside braces: 1.x templates that need `%{name}`
+| `functionsApplied` | `name(arg,arg)` for every function run, in order
+| `errors` | one message per failure
+|===
+
+`argv_process` returns an `ArgvResult`: `status`, the processed `argv`, and the `TagResult` of each argument.
+
+== Moving a 1.x template
+
+A 1.x template, `run-%timestamp_chrplc|:|-_.log`, contains no `%{`, so under 3.0 it passes through untouched, which would be a silent failure. pftag therefore recognises a bare `%` followed by a known name, or by a known name and `_`, as a probable 1.x tag: it is reported in `legacyTags`, warned about at verbosity 1 and above, and fails the run under `--strict`. The rewrite is mechanical:
+
+----
+%timestamp                        →  %{timestamp}
+%file_rmext_.jpg                  →  %{file|rmext}.jpg
+%timestamp_chrplc|:|-,md5|6_      →  %{timestamp|replace(:,-)|md5(6)}
+%literal_echo|Subject12345,md5|5_ →  %{"Subject12345"|md5(5)}
+%NAME_dcmname|seed|^ANON_         →  %{NAME|dcmname(seed)}^ANON
+%platform_strmsk|l****_           →  %{platform|mask(l****)}
+----
+
+`chrplc` and `strrepl` became `replace` (literal) and `re` (regular expression); `strmsk` became `mask`; `echo` and `%literal` are replaced by a quoted head; `os`, `release`, `machine` and `arch` are gone, and `hostname`, `user`, `pid` and `date` are new.
