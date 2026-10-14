@@ -23,10 +23,11 @@ import sys
 from collections.abc import Sequence
 
 from pftag import __version__
+from pftag.manual import Manual, manual_print
 from pftag.models import TagOptions, TagResult
 from pftag.pftag import Pftag
 
-BANNER: str = r"""
+BANNER_ART: str = r"""
           __  _
          / _|| |
    _ __ | |_ | |_   __ _   __ _
@@ -36,6 +37,11 @@ BANNER: str = r"""
   | |                      __/ |
   |_|                     |___/
 
+"""
+
+BANNER_TITLE: str = "string template processor"
+
+BANNER_TEXT: str = """
                        string template processor
 
         Text with %{tags} in it, resolved when the text is used. A tag
@@ -237,10 +243,17 @@ def options_fromArgs(args: argparse.Namespace) -> TagOptions:
     return TagOptions(strict=args.strict, tag=args.tag, json=args.json, verbosity=args.verbosity)
 
 
-def manual_print(shortOnly: bool) -> None:
-    """Print the banner and the manual."""
-    print(BANNER.replace("{version}", __version__))
-    print(synopsis(shortOnly))
+def manual_build() -> Manual:
+    """The pftag manual page."""
+    return Manual(
+        command="pftag",
+        art=BANNER_ART,
+        title=BANNER_TITLE,
+        text=BANNER_TEXT,
+        version=__version__,
+        synopsisShort=synopsis(shortOnly=True),
+        synopsisFull=synopsis(shortOnly=False),
+    )
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -256,7 +269,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser: argparse.ArgumentParser = parser_build()
     args: argparse.Namespace = parser.parse_args(argv)
     if args.man or args.synopsis:
-        manual_print(shortOnly=not args.man)
+        manual_print(manual_build(), shortOnly=not args.man)
         return 0
     if not args.tag:
         parser.error("--tag is required")

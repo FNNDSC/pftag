@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import json
+import re
 
 import pytest
 
 from pftag import __version__
-from pftag.__main__ import main
+from pftag.__main__ import main, manual_build
 
 
 def test_main_printsResult(capsys: pytest.CaptureFixture[str]) -> None:
@@ -74,3 +75,42 @@ def test_main_versionAndManual(capsys: pytest.CaptureFixture[str]) -> None:
     assert "%{inputWorkingFile|rmext}.jpg" in out
     assert main(["--synopsis"]) == 0
     assert "GRAMMAR" not in capsys.readouterr().out
+
+
+def test_main_manPrintsFullManual_plainWhenPiped(capsys: pytest.CaptureFixture[str]) -> None:
+    from pftag import __version__
+
+    assert main(["--man"]) == 0
+    text: str = capsys.readouterr().out
+    for heading in (
+        "NAME",
+        "SYNOPSIS",
+        "DESCRIPTION",
+        "ARGUMENTS",
+        "GRAMMAR",
+        "TAGS",
+        "FUNCTIONS",
+        "EXAMPLES",
+    ):
+        assert re.search(rf"^    {heading}\s*$", text, re.M), heading
+    assert "``" not in text and "\033" not in text
+    assert f"version {__version__}" in text
+
+
+def test_main_synopsisIsBrief(capsys: pytest.CaptureFixture[str]) -> None:
+    assert main(["--synopsis"]) == 0
+    text: str = capsys.readouterr().out
+    assert "SYNOPSIS" in text and "DESCRIPTION" not in text
+
+
+def test_manual_colourised_page() -> None:
+    from pftag.manual import BG_PAGE, FG_COMMAND, FG_FLAG, FG_HEADING, NO_COLOUR, manual_render
+
+    manual = manual_build()
+    page: str = manual_render(manual, shortOnly=False, colour=True, width=120)
+    escape: re.Pattern[str] = re.compile(r"\033\[[0-9;]*m")
+    lines: list[str] = page.splitlines()
+    assert all(line.startswith(BG_PAGE) and line.endswith(NO_COLOUR) for line in lines)
+    assert all(len(escape.sub("", line)) == 120 for line in lines)
+    assert BG_PAGE + FG_HEADING + "    GRAMMAR" in page
+    assert FG_COMMAND + "pftag" in page and FG_FLAG + "--tag" in page

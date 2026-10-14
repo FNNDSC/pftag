@@ -21,7 +21,7 @@ Dependencies:
 
 from __future__ import annotations
 
-__version__: str = "3.0.0"
+__version__: str = "3.1.0"
 
 from pftag.functions import FunctionError, FunctionRegistry
 from pftag.models import ArgvResult, FunctionCall, TagOptions, TagResult, TagToken
