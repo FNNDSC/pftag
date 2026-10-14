@@ -1,356 +1,284 @@
-#!/usr/bin/env python
-try:
-    from    .                   import pftag
-except:
-    from pftag                  import pftag
+"""The ``pftag`` command line and its manual.
 
-from    pathlib                 import Path
-from    argparse                import ArgumentParser,                  \
-                                       Namespace,                       \
-                                       ArgumentDefaultsHelpFormatter,   \
-                                       RawTextHelpFormatter
+Key components:
+    - parser_build: the arguments
+    - synopsis: the manual text
+    - main: the entry point, honouring an explicit ``argv``
 
-from importlib.metadata import Distribution
+Typical usage:
+    pftag --tag "run-%{timestamp|replace(:,-)}-on-%{hostname}.log"
+    pftag --lookupDictAdd '{"s": {"user": "chris"}}' --tag "%{user|md5(8)}"
+    pftag --man
 
-__pkg       = Distribution.from_name(__package__)
-__version__ = __pkg.version
-
-import  os, sys, json
-os.environ['XDG_CONFIG_HOME'] = '/tmp'
-import  pudb
-from    pudb.remote             import set_trace
-from    pftag.pftag             import parser_setup, parser_interpret, parser_JSONinterpret
-
-
-DISPLAY_TITLE = r"""
-
-        __ _
-       / _| |
- _ __ | |_| |_ __ _  __ _
-| '_ \|  _| __/ _` |/ _` |
-| |_) | | | || (_| | (_| |
-| .__/|_|  \__\__,_|\__, |
-| |                  __/ |
-|_|                 |___/
-
+Dependencies:
+    - pftag.pftag, pftag.models
 """
 
-str_desc: str                =  DISPLAY_TITLE + """
+from __future__ import annotations
 
-                        -- version """ + __version__ + """ --
+import argparse
+import json
+import logging
+import sys
+from collections.abc import Sequence
 
-        An in-place string token lookup and optional function processor. This
-        package provides both a CLI client as well as a python module.
+from pftag import __version__
+from pftag.models import TagOptions, TagResult
+from pftag.pftag import Pftag
 
+BANNER: str = r"""
+          __  _
+         / _|| |
+   _ __ | |_ | |_   __ _   __ _
+  | '_ \|  _|| __| / _` | / _` |
+  | |_) | |  | |_ | (_| || (_| |
+  | .__/|_|   \__| \__,_| \__, |
+  | |                      __/ |
+  |_|                     |___/
 
+                       string template processor
+
+        Text with %{tags} in it, resolved when the text is used. A tag
+        names a value and may pipe it through functions:
+
+            %{inputWorkingFile|rmext}.jpg
+            %{timestamp|replace(:,-)|md5(6)}
+
+                             -- version {version} --
 """
 
-package_CLIself:str         = """
-        --tag <tagString>                                                       \\
-        [--lookupDictAdd <listOfDictionaryString>]                              \\
-        [--tagMarker <mark>]                                                    \\
-        [--funcMarker <mark>]                                                   \\
-        [--funcArgMarker <mark>]                                                \\
-        [--funcSep <mark>]                                                      \\
-        [--inputdir <inputdir>]                                                 \\
-        [--outputdir <outputdir>]                                               \\
-        [--man]                                                                 \\
+CLI_SELF: str = """
+        --tag <template>                                                        \\
+        [--lookupDictAdd <json>]                                                \\
+        [--strict]                                                              \\
+        [--json]                                                                \\
         [--verbosity <level>]                                                   \\
-        [--debug]                                                               \\
-        [--debugTermsize <cols,rows>]                                           \\
-        [--debugHost <0.0.0.0>]                                                 \\
-        [--debugPort <7900>]"""
+        [--man] [--synopsis] [--version]"""
 
-package_CLIsynpsisArgs:str  = """
+ARGS_SYNOPSIS: str = """
     ARGUMENTS
 
-        --tag <tagString>
-        The tag string to process.
+        --tag <template>
+        The template to process: any text, with tags written %{...}.
 
-        [--lookupDictAdd <listOfDictionaryString>]
-        A string list of additional named lookup dictionary tags and values to
-        add.
+        [--lookupDictAdd <json>]
+        Named lookup dictionaries to add, as a JSON object
 
-        [--tagMarker <mark>]
-        The marker string that identifies a tag (default "%")
+            '{"secrets": {"CUBEuser": "chris", "CUBEpassword": "chris1234"}}'
 
-        [--funcMarker <mark>]
-        The marker string that pre- and post marks a function (default "_").
+        or a list of such objects. Each adds a group of tags, here
+        %{CUBEuser} and %{CUBEpassword}, that can be piped through functions
+        like any tag. A tag name is an identifier: letters, digits and
+        underscores, not starting with a digit. A name may be defined by one
+        dictionary only, unless it is always written qualified: %{secrets.CUBEuser}.
 
-        [--funcArgMarker <mark>]
-        The marker string between function arguments and also between arg list
-        and function (default "|").
+        [--strict]
+        An unknown tag, or a bare %name of a known name outside braces (a 1.x
+        template), fails the run (exit 1) instead of being left as written.
 
-        [--funcSep <mark>]
-        The marker string separating successive function/argument constructs
-        (default ",").
-
-        [--pftelUser <user>] ("chris")
-        The name of the pftel user. Reserved for future use.
-
-        [--inputdir <inputdir>]
-        An optional input directory specifier. Reserverd for future use.
-
-        [--outputdir <outputdir>]
-        An optional output directory specifier. Reserved for future use.
-
-        [--man]
-        If specified, show this help page and quit.
+        [--json]
+        Print the whole result as JSON: the text, the tags found, the unknown
+        and 1.x-style tags, the functions applied, any errors.
 
         [--verbosity <level>]
-        Set the verbosity level. The app is currently chatty at level 0 and level 1
-        provides even more information.
+        0 (the default) prints only the result; 1 adds warnings about 1.x-style
+        tags; higher levels log more.
 
-        [--debug]
-        If specified, toggle internal debugging. This will break at any breakpoints
-        specified with 'Env.set_trace()'
-
-        [--debugTermsize <253,62>]
-        Debugging is via telnet session. This specifies the <cols>,<rows> size of
-        the terminal.
-
-        [--debugHost <0.0.0.0>]
-        Debugging is via telnet session. This specifies the host to which to connect.
-
-        [--debugPort <7900>]
-        Debugging is via telnet session. This specifies the port on which the telnet
-        session is listening.
+        [--man] [--synopsis] [--version]
+        The full manual, the brief one, the version.
 """
 
-package_CLIfunctions:str = r"""
+GRAMMAR: str = """
+    GRAMMAR
+
+        A tag is %{ followed by a head, optional functions, and }:
+
+            %{name}
+            %{name|function}
+            %{name|function(arg, arg)|function}
+            %{"literal text"|function}
+
+        Nothing outside %{...} is a tag: printf "%s", date +%Y%m%d and %20 in
+        a URL pass through untouched. Inside the braces % is ordinary, so
+        %{timestamp|strftime(%Y%m%d)} works. \\%{ is a literal "%{".
+
+        The head is a tag name, qualified with its dictionary's name when
+        two dictionaries define it (%{secrets.user}), or a quoted string that
+        starts a chain from literal text. Functions follow in pipe order,
+        left to right, each receiving the previous result. Arguments are
+        comma-separated inside parentheses, bare or quoted; a bare argument
+        is trimmed and may not contain , ) | or }; inside quotes, \\" \\' and
+        \\\\ escape. A function with no arguments may be written with or
+        without ().
+
+        Text after the closing } is kept: %{file|rmext}.txt keeps ".txt".
+        An unknown name is left as written and reported (see --strict). A
+        function that fails leaves its tag as written and fails the run.
+        Values are substituted once; a value containing %{...} is not
+        processed again.
+"""
+
+TAGS_AND_FUNCTIONS: str = """
+    TAGS
+
+        %{timestamp}  the current local time, ISO 8601 with offset
+        %{date}       today's date, YYYY-MM-DD
+        %{hostname}   the host name (in a container, the container id)
+        %{platform}   platform.system(), such as Linux
+        %{user}       the login name, or the numeric uid without a passwd entry
+        %{pid}        the process id
+
+        plus every tag in a registered lookup dictionary. %{core.timestamp}
+        reaches a core tag that a dictionary has shadowed.
 
     FUNCTIONS
 
-        OVERVIEW
-        In addition to performing a lookup on a template string token, this
-        package can also process the lookup value in various ways. These
-        process functions follow a Reverse Polish Notation (RPN) schema of
+        rmext                   drop the last extension: brain.nii.gz -> brain.nii
+        ext                     the last extension without its dot: gz
+        basename                the last path component
+        dirname                 the path without its last component
+        replace(a, b)           replace every a with b, literally
+        re(pattern, repl)       replace every regular-expression match
+        upper, lower            change case
+        strip[(chars)]          drop surrounding whitespace, or the given chars
+        pad(width[, char])      left-pad with char (default 0): 7 -> 0007
+        slice(stop) / slice(start, stop)
+                                characters by index, Python style
+        md5[(n)], sha256[(n)]   hex digest, cut to n characters
+        strftime(format)        format an ISO 8601 timestamp: %{timestamp|strftime(%Y%m%d)}
+        mask(pattern)           per position, * keeps the character, anything
+                                else replaces it; positions past the pattern
+                                are kept
+        dcmname[(seed)]         a LAST^FIRST pseudonym, stable for a seed (the
+                                value itself when no seed is given). Needs
+                                pip install 'pftag[names]'. A seeded hash
+                                wearing a name, not anonymization.
 
-            tag func1 func2 func3 ...
+        Carrying protected text safely, hashed rather than written:
 
-        where first the <tag> is looked up, then this lookup is processed by
-        <func1>. The result is then processed by <func2>, and so on and
-        so forth.
-
-        This RPN approach also mirrors the standard UNIX piping schema.
-
-        A function that is to be applied to a <tag> should be connected
-        to the tag with a <funcMarker> string, usually '_'. The final
-        function should end with the same <funcMarker>, so
-
-            %tag_func_
-
-        will apply the function called "func" to the tag called "tag".
-
-        Some functions can accept arguments. Arguments are passed to a function
-        with a <funcArgMarker> string, typically '|', that also separates
-        arguments:
-
-            %tag_func|a1|a2|a3_
-
-        will pass 'a1', 'a2', and 'a3' as parameters to "func".
-
-        Finally, several functions can be chained within the '_'...'_' by
-        separating the <func>|<argList> constructs with commas, so
-
-            %tag_func|a1|a2|a3,func2|b1|b2|b3_
-
-        All these special characters (tag marker, function pre- and post,
-        arg separation, fand unction separation can be overriden. For instance,
-        with a selection of
-
-        --tagMarker "@" --funcMarker "[" --funcArgMarker "," --funcSep "|"
-
-        strings can be specified as
-
-            @tag[func,a1,a2,a3|func2,b1,b2,b3[
-
-        where preference/legibilty is left to the user
+            %{"Subject12345"|sha256(8)}
 """
 
+EXAMPLES: str = """
+    EXAMPLES
 
-package_CLItagsFuncs:str = r"""
-
-        AVAILABLE TAGS AND FUNCTIONS
-
-        Additional tag lookup structures can be added with either the CLI
-        or directory using the python API:
-
-        --lookupDictAdd '[{"secrets": {"CUBEuser": "rudolph", "CUBEpassword": "rudolph1234"}}]'
-
-        will add a new named lookup group called 'secrets' with tags %CUBEuser
-        and %CUBEpassword, substituted in string tags with the values as
-        shown. Any of these new tag lookups can be further processed by
-        internal functions.
-
-        The following tags are available:
-
-            %literal   : simply replace the tag with the word 'literal'.
-                          This tag is only useful in conjunction with the
-                          'echo' function and together they provide a means
-                          to inject arbitary text typically for md5 hashing.
-            %name      : return the os.name
-            %platform  : return the platform.system()
-            %release   : return the platform.release()
-            %machine   : return the platform.machine()
-            %arch      : return the '%s' % platform.architecture()
-            %timestamp : return the current timestamp
-
-        The following functions are available:
-
-        md5|<chars>         : perform an md5hash on the upstream, limit result
-                              to <chars> characters
-
-                                eg: "%timestamp_md5|4_"
-
-                              replace the %timestamp in the input string with
-                              an md5 hash of 4 chars of the actual timestamp.
-
-        chrplc|<t>|<n>      : replace <t> with <n> in the upstream input.
-
-                                eg: "%timestamp_chrplc|:|-_"
-
-                              replace the %timestamp in the input string with
-                              the actual timestamp where all ":" are replaced with
-                              "-".
-
-        strmsk|<mask>       : for each '*' in mask pattern use upstream char
-                              otherwise replace with <mask> char.
-
-                                eg: "%platform_strmsk|l****_"
-
-                              replace the %platform in the input string with
-                              a string that starts with an 'l' and don't change
-                              the subsequent 4 characters. If the %platform
-                              has more than 4 characters, only return the 5
-                              chars as masked.
-
-        dcmname|<s>|<tail> : replace any upstream %VAR with a DICOM formatted
-                              name. If <s> is passed, the seed the faker module
-                              with <s> (any string) -- this guarantees that calls
-                              with that same <s> result in the same name. If
-                              <tail> is passed, then append <tail> to the name.
-
-                                eg: %NAME_dcmname_
-
-                             may produce "BROOKS^JOHN". Each call will have
-                             a different name. However,
-
-                                %NAME_dcmname|foobar_
-
-                            will always generate "SCHWARTZ^THOMAS". While
-
-                                %NAME_dcmname|foobar|^ANON
-
-                            will generate "SCHWARTZ^THOMAS^ANON"
-
-        echo|<something> :  Best used with the %literal tag for legibility, will
-                            replace the tag with <something>. Be careful of commas
-                            in the <something>. If they are to be preserved you
-                            will need to set --funcSep to something other than a
-                            comma.
-
-                                %literal_echo|why-are-we-here?_
-
-                            will replace the %literal with "why-are-we-here".
-                            This is most useful when literal data is to obscured
-                            in a template. For instance:
-
-                                %literal_echo|Subject12345,md5|5_
-
-                            where say "Subject12345" is privileged information but
-                            important to add to the string. In this case, we can
-                            add and then hash that literal string. In future,
-                            if we know all the privileged strings, we can easily
-                            hash and then and lookup in any `pftag` generated
-                            strings to resolve which hashes belong to which
-                            subjects.
-
+        pftag --tag "run-%{timestamp}-on-%{hostname}.log"
+        pftag --tag "run-%{timestamp|replace(:,-)}-on-%{hostname}.log"
+        pftag --tag "run-%{timestamp|strftime(%Y%m%d-%H%M)}.log"
+        pftag --lookupDictAdd '{"s": {"user": "chris"}}' --tag "user %{user}, hash %{user|md5(8)}"
+        pftag --tag "100% done, %{date}"
+        pftag --tag "%{nope}" --strict        # exit 1
 """
 
-package_CLIexample:str = r"""
-    BRIEF EXAMPLES
-    Note that some shells (like fish) might require quoting about the tag argument.
+VERBOSITY_LOG_LEVELS: dict[int, int] = {0: logging.ERROR, 1: logging.WARNING, 2: logging.INFO}
 
-        pftag --tag "run-%timestamp-on-%platform.log"
-        pftag --tag "run-%timestamp_chrplc|:|-_-on-%platform.log"
-        pftag --tag "run-%timestamp_chrplc|:|-,md5|6_-on-%platform.log"
 
-"""
+def synopsis(shortOnly: bool = False) -> str:
+    """The manual text.
 
-def synopsis(ab_shortOnly = False):
-    scriptName = os.path.basename(sys.argv[0])
-    shortSynopsis =  '''
+    Args:
+        shortOnly: NAME and SYNOPSIS only.
+
+    Returns:
+        The text, without the banner.
+    """
+    short: str = (
+        """
     NAME
 
-        pftag
+        pftag - resolve %{tags} in a template, with optional functions
 
     SYNOPSIS
 
-        pftag                                                               \ '''\
-        + package_CLIself + '''
-
-    '''
-
-    description = '''
+        pftag \\"""
+        + CLI_SELF
+        + "\n"
+    )
+    if shortOnly:
+        return short
+    description: str = """
     DESCRIPTION
 
-        `pftag` is both a script and python module for processing "tag"ed
-        strings with optional functions. It is useful when using templated
-        strings that need to be processed at "runtime".
+        pftag is both a command and a library for processing templates: text
+        whose %{tags} are resolved when the text is used, each optionally
+        piped through functions. The core tags describe the machine and the
+        moment; a program adds its own tags as named lookup dictionaries.
+        The pf* family uses it wherever a user writes a template on the
+        command line, such as pfdo_run's --exec string and pflog's
+        telemetry URLs. See docs/tags.adoc for the full reference.
+"""
+    return short + description + ARGS_SYNOPSIS + GRAMMAR + TAGS_AND_FUNCTIONS + EXAMPLES
 
-    ''' + package_CLIsynpsisArgs + package_CLIfunctions + package_CLItagsFuncs + package_CLIexample
-    if ab_shortOnly:
-        return shortSynopsis
-    else:
-        return shortSynopsis + description
 
-# parser: ArgumentParser = ArgumentParser(description         = '''A client for pftag''',
-#                                         formatter_class     = RawTextHelpFormatter
-# )
+def parser_build() -> argparse.ArgumentParser:
+    """The command's parser.
 
-def earlyExit_check(args) -> int:
+    Returns:
+        The parser; ``--help`` is the quick reference and points at ``--man``.
     """
-    Perform some preliminary checks
+    parser: argparse.ArgumentParser = argparse.ArgumentParser(
+        prog="pftag",
+        description="Resolve %%{tags} in a template, optionally through piped functions. Manual: pftag --man",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument("--tag", dest="tag", default="", help="the template to process")
+    parser.add_argument("--lookupDictAdd", dest="lookupDictAdd", default="", help="lookup dictionaries, JSON")
+    parser.add_argument("--strict", dest="strict", action="store_true", help="unknown or 1.x-style tags fail")
+    parser.add_argument("--json", dest="json", action="store_true", help="print the whole result as JSON")
+    parser.add_argument("--verbosity", dest="verbosity", type=int, default=0, help="0 prints only the result")
+    parser.add_argument("--man", dest="man", action="store_true", help="show the full manual and exit")
+    parser.add_argument("--synopsis", dest="synopsis", action="store_true", help="show the brief manual")
+    parser.add_argument("--version", action="version", version=f"pftag {__version__}")
+    return parser
 
-    If version or synospis are requested, print these and return
-    code for early exit.
+
+def options_fromArgs(args: argparse.Namespace) -> TagOptions:
+    """Turn parsed arguments into options."""
+    return TagOptions(strict=args.strict, tag=args.tag, json=args.json, verbosity=args.verbosity)
+
+
+def manual_print(shortOnly: bool) -> None:
+    """Print the banner and the manual."""
+    print(BANNER.replace("{version}", __version__))
+    print(synopsis(shortOnly))
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    """Run the command.
+
+    Args:
+        argv: arguments without the program name; ``None`` reads ``sys.argv``.
+
+    Returns:
+        0 when the template was processed; 1 when ``--strict`` met an unknown or
+        1.x-style tag, a tag did not parse, or a function failed; 2 on bad arguments.
     """
-    str_help:str = ''
+    parser: argparse.ArgumentParser = parser_build()
+    args: argparse.Namespace = parser.parse_args(argv)
     if args.man or args.synopsis:
-        print(str_desc)
-        if args.man:
-            str_help     = synopsis(False)
-        else:
-            str_help     = synopsis(True)
-        print(str_help)
-        return 1
-    if args.b_version:
-        print("Name:    %s\nVersion: %s" % (__pkg.name, __version__))
-        return 1
-    if int(args.verbosity) > 1: print(DISPLAY_TITLE)
-    return 0
+        manual_print(shortOnly=not args.man)
+        return 0
+    if not args.tag:
+        parser.error("--tag is required")
+    options: TagOptions = options_fromArgs(args)
+    logging.basicConfig(
+        level=VERBOSITY_LOG_LEVELS.get(options.verbosity, logging.DEBUG), format="%(message)s"
+    )
+    try:
+        tagger: Pftag = Pftag(options)
+        if args.lookupDictAdd:
+            tagger.lookups_addFromJson(args.lookupDictAdd)
+    except ValueError as err:
+        parser.error(str(err))
+    result: TagResult = tagger.process(options.tag)
+    if options.json:
+        print(json.dumps(result.toDict(), indent=4, sort_keys=True))
+    else:
+        print(result.result)
+    for error in result.errors:
+        print(error, file=sys.stderr)
+    return 0 if result.status else 1
 
-def main(argv=None) -> int:
-    """
-    Main method for the programmatical calling the pftag
-    module
-    """
 
-    # Call the following to collect the logger Namespace
-    # and then edit values in the options:Namespace if needed
-    parser:ArgumentParser   = parser_setup('A client for logging to a pftel server')
-    options:Namespace       = parser_interpret(parser, argv)
-
-    # any reason we should not continue?
-    if earlyExit_check(options): return 1
-
-    # set_trace(term_size=(253, 62), host = '0.0.0.0', port = 7900)
-    tag:pftag.Pftag         = pftag.Pftag(options)
-    d_pftag:dict            = tag.run(options.tag)
-    if d_pftag['status']: print(d_pftag['result'])
-
-    return 0 if d_pftag['status'] else 2
-
-if __name__ == '__main__':
-    sys.exit(main(sys.argv))
+if __name__ == "__main__":
+    sys.exit(main())

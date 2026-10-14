@@ -1,0 +1,32 @@
+= pftag: architecture
+:toc:
+
+== Abstract
+
+pftag is four modules and a command: `models` holds the options, tokens and results as dataclasses; `functions` holds the function registry and the built-ins; `names` holds the pseudonym function behind its optional dependency; `pftag` holds the engine, a single-pass scanner that recognises `%{...}` tags, parses their heads and function chains and replaces them. The design turns on one decision: a tag has an explicit opening and closing, `%{` and `}`, so the scanner never has to guess where a tag starts or a name ends, and everything else follows from it.
+
+== The scanner
+
+`Pftag.process` walks the template once, left to right, building the output as it goes. It copies characters until it meets `%{`; `\%{` is copied as a literal `%{`. At `%{`, `token_parse` reads the head: a quoted string, or a name matched by a regular expression for identifiers with an optional `.` qualifier. Then, while a `|` follows, `call_parse` reads a function name and, if `(` follows, its arguments, each read by `argument_read` as a quoted string with escapes or as bare text up to the next `,` or `)`. The tag ends at `}`; anything else is a `TagSyntaxError`, which fails the result and leaves the rest of the template as written.
+
+Because the braces delimit the tag, no name matching is needed against the text: the head is whatever stands between `%{` and the first `|` or `}`, and it either resolves or it does not. That removes the longest-first matching the previous engine needed to let a tag run into text, and the rule that forbade underscores in names. It also means a bare `%` can never begin a tag, which is why `printf` formats, `strftime` patterns and percent-encoded URLs pass through untouched: the previous grammar's one real hazard, that every `%` followed by a letter was a candidate tag whose fate depended on which names happened to be registered.
+
+`legacy_check` runs after the scan over the original text and reports bare `%name` occurrences of known names, or of a known name followed by `_`, as probable 1.x tags. Without it an old template would pass through 3.0 unchanged and without error, a silent failure; with it the result names the tag and, under `strict`, fails.
+
+== Values and functions
+
+`value_lookup` resolves a qualified head in its named dictionary, or `core.` in the core tags, and an unqualified head in the dictionary that registered it, falling back to the core tags, so a program can shadow `%{platform}` and a template can still reach `%{core.platform}`. `lookup_add` refuses a name that another dictionary already defines; a silent shadow between two dictionaries would be a bug in the program, not a choice. Core values are computed when asked, which matters for `%{timestamp}`. `token_render` passes the value through the chain by calling `FunctionRegistry.apply` for each `FunctionCall`; a `FunctionError`, raised for an unknown function or unusable arguments, fails the tag: the tag is left as written, the error is recorded on the result, and the rest of the template still resolves. Failing the whole template for one bad function would throw away the information the user needs to fix it.
+
+`FunctionRegistry` maps names to functions of the signature `(value, args) -> str` and is preloaded with the built-ins, each of which checks its argument count and raises `FunctionError` with a message naming the function. It is an object rather than a module-level table so that two engines in one process can have different functions, and so that a caller's additions do not leak into other callers. `dcmname` lives in `pftag.names`, is registered only when `faker` imports, builds its own `Faker` instance and seeds that instance, where 1.x seeded the global generator and changed the behaviour of every other `Faker` user in the process; asking for it without the extra installed produces a message that says what to install.
+
+== The models
+
+`TagOptions` carries the initial lookups, strictness and the command's flags; there are no marker options, since the grammar has one form. `TagToken` records where a tag was found, whether its head was a literal, and what chain it carried, so the engine can copy a failing tag back verbatim. `TagResult` is what a caller gets from `process`: the processed text and the account of every tag, which `--json` prints. `ArgvResult` is what `argv_process` returns for a command: the processed arguments and each one's `TagResult`, with a `status` the caller checks before running anything. The 1.x result was a dictionary with `status` and `result` keys; the dataclasses name the rest of what happened.
+
+== The command
+
+`__main__` is a thin parser over the engine: `--tag`, `--lookupDictAdd` as JSON in either the object or the 1.x list form, `--strict`, `--json`, and the manual. The manual is plain text rather than the coloured page pftree renders, because pftag depends on nothing and the page renderer lives in pftree; the sections are the same.
+
+== Verification
+
+The tests cover the scanner on every edge the grammar has: tags running into text, names with underscores, bare `%` in `printf` and URL text, the escape, unknown tags verbatim and under strict, 1.x-style tags reported and failed, unclosed tags, literal heads with quotes and escapes, functions with and without parentheses, bare and quoted arguments, chains, failing and unknown functions, syntax errors, qualified names and duplicate-name registration, lookup shadowing of core tags, both JSON lookup forms, no recursion, `argv_process` keeping arguments intact and refusing a failed command, a custom registry, each built-in function as a table, and the seeded pseudonym. The command is tested through `main`. Continuous integration runs ruff and the suite on CPython 3.11 through 3.14 and 3.14t and publishes on a `v*` tag.

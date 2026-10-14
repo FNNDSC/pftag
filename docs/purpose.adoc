@@ -1,0 +1,28 @@
+= pftag: purpose
+:toc:
+
+== Abstract
+
+pftag resolves templates: text in which `%{tags}` stand for values known only when the text is used, each tag optionally piped through functions. It exists so that the pf* family's tools can accept a template on the command line, a shell command for every directory, a log destination, an output file name, and resolve it the same way everywhere, with one grammar, one set of functions and one implementation.
+
+== The problem
+
+A tool that does the same thing in many places needs the user to say, once, what varies from place to place. `pfdo_run` runs a shell command in every directory of a tree; the command must name that directory's input and output paths and the file being handled, and the user must be able to derive output names from input names. `pflog` posts an event to a telemetry server at a URL that encodes the run, the machine and the time. A FreeSurfer plugin builds its command from the subject's directory. In each case the user writes the text before the values exist, and the program fills them in.
+
+The naive answer is Python's own formatting, `{inputWorkingFile}` and `str.format`. It fails in two ways on a command line. The braces are shell metacharacters in several shells and collide with brace expansion; and the user needs to transform values, not only insert them, and `format` cannot drop an extension or hash a name. The answer the family settled on in 2020, inside pfdo_run, was a `%` marker and a small vocabulary of functions written next to the tag. pftag is that answer lifted out into a package in 2023 so that pflog and others could share it, and redesigned in 2026, as version 3, so that it can be relied on: one delimited form, `%{...}`, that nothing else in a command line or a URL can be mistaken for.
+
+== What pftag is
+
+A template is text; a tag is `%{`, a name, optional functions and `}`, the functions in the order a pipe would apply them: `%{timestamp|replace(:,-)|md5(6)}`. Names resolve against core tags that describe the machine and the moment, `%{hostname}`, `%{timestamp}` and the rest, and against dictionaries the calling program registers, which is how `pfdo_run` makes `%{inputWorkingDir}` mean the directory it is in. A quoted head starts a chain from literal text, `%{"Subject12345"|sha256(8)}`. An unknown name is left as written, so a template that fails to resolve is still legible in the output, and a bare `%name` of a known name is flagged as a 1.x template rather than passed through silently.
+
+The functions are deliberately few and carry the names other tools use: path parts, literal and regular-expression replacement, case, padding and slicing, hashing, timestamp formatting, masking, and a stable pseudonymous DICOM name kept behind an optional dependency. They are what the family's tools have needed to build names and to carry protected identifiers safely, hashed rather than written. The registry takes more from any caller.
+
+The result of processing is a record, not just a string: the text, every tag found, those left unresolved, every function applied, and any error, so that a tool can decide whether an unresolved tag is a mistake and can show a user what their template did.
+
+== What pftag is not
+
+pftag is not a template language. It has no conditionals, loops, or arithmetic, and will not grow them; a template that needs them is a program and should be written as one. It is not a shell: `process` substitutes text and does not quote it. For commands it offers `argv_process` instead, which substitutes into each already-split argument so that a value with a space or a quote cannot change the command's shape; `pfdo_run` splits its `--exec` string first and uses that. And it is not a configuration or secrets store; the lookups it is given live for one run.
+
+== Who uses it
+
+`pfdo_run` resolves its `--exec` string with pftag for every directory, which makes `pl-shexec` and `pl-freesurfer` pftag users by extension. `pflog` resolves telemetry URLs with it. Fifteen FNNDSC repositories list it, among them `pfbridge`, `pfchrs`, `pfmdb` and `pfms` on the service side and a dozen plugins on the ChRIS side.
