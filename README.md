@@ -49,7 +49,7 @@ import shlex
 from pftag import Pftag, TagOptions
 
 tagger = Pftag(TagOptions(lookups={"run": {"subject": "sub-01", "file": "T1.nii.gz"}}))
-tagger("%{subject}/%{file|rmext}.jpg").result            # 'sub-01/T1.nii.jpg'
+tagger("%{subject}/%{file|rmext}.jpg").result  # 'sub-01/T1.nii.jpg'
 tagger.argv_process(shlex.split("convert %{file} %{file|rmext}.jpg")).argv
 ```
 
